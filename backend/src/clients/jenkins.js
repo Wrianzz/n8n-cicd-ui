@@ -2,7 +2,7 @@ import axios from "axios";
 import { config } from "../config.js";
 import { sleep } from "../utils/sleep.js";
 
-// Ubah "folder/sub/jobName" -> "job/folder/job/sub/job/jobName"
+// "folder/sub/jobName" -> "job/folder/job/sub/job/jobName"
 function toJobPath(jobNameOrPath) {
   const parts = jobNameOrPath.split("/").filter(Boolean);
   return parts.map((p) => `job/${encodeURIComponent(p)}`).join("/");
@@ -11,27 +11,50 @@ function toJobPath(jobNameOrPath) {
 const jenkins = axios.create({
   baseURL: config.jenkins.baseUrl,
   timeout: 30000,
-  auth: {
-    username: config.jenkins.user,
-    password: config.jenkins.token,
-  },
-  // axios akan follow redirect by default untuk GET; untuk POST kita biarkan.
+  auth: { username: config.jenkins.user, password: config.jenkins.token },
   maxRedirects: 0,
   validateStatus: (s) => s >= 200 && s < 400,
 });
 
 async function getCrumbIfNeeded() {
-  // Dengan API token, request POST umumnya exempt dari CSRF crumb :contentReference[oaicite:12]{index=12}
-  // Tapi ambil crumb tetap aman; kalau instance kamu butuh, ini menyelamatkan.
+  // Dengan API token biasanya exempt, tapi ambil crumb tetap aman.
   try {
     const res = await jenkins.get("/crumbIssuer/api/json");
     const field = res.data?.crumbRequestField;
     const crumb = res.data?.crumb;
     if (field && crumb) return { field, crumb };
-  } catch {
-    // ignore: banyak instance tidak expose crumbIssuer atau tidak butuh
+  } catch {}
+  return null;
+}
+
+function extractApprovalInfo(buildJson) {
+  const actions = Array.isArray(buildJson?.actions) ? buildJson.actions : [];
+  for (const a of actions) {
+    const cls = String(a?._class || "");
+    // umum: org.jenkinsci.plugins.workflow.support.steps.input.InputAction
+    if (cls.includes("InputAction")) {
+      const inputs = Array.isArray(a?.inputs) ? a.inputs : [];
+      if (inputs.length > 0) {
+        const first = inputs[0];
+        return {
+          message: first?.message || null,
+          proceedText: first?.proceedText || null,
+          id: first?.id || null,
+          url: first?.url || null, // kadang relative
+        };
+      }
+    }
   }
   return null;
+}
+
+async function getJsonAbsolute(url) {
+  const res = await axios.get(url, {
+    auth: { username: config.jenkins.user, password: config.jenkins.token },
+    timeout: 30000,
+    headers: { accept: "application/json" },
+  });
+  return res.data;
 }
 
 export async function triggerJob(jobNameOrPath, paramsObj) {
@@ -43,30 +66,15 @@ export async function triggerJob(jobNameOrPath, paramsObj) {
   const form = new URLSearchParams();
   for (const [k, v] of Object.entries(paramsObj)) form.set(k, String(v));
 
-  const headers = {
-    "Content-Type": "application/x-www-form-urlencoded",
-  };
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
   if (crumb) headers[crumb.field] = crumb.crumb;
 
   const res = await jenkins.post(endpoint, form.toString(), { headers });
 
-  // Jenkins biasanya mengembalikan Location header ke queue item untuk dipoll :contentReference[oaicite:13]{index=13}
   const location = res.headers?.location;
-  if (!location) {
-    throw new Error(`No Location header from Jenkins when triggering job: ${jobNameOrPath}`);
-  }
+  if (!location) throw new Error(`No Location header from Jenkins: ${jobNameOrPath}`);
 
   return { queueUrl: location.endsWith("/") ? location : `${location}/` };
-}
-
-async function getJsonAbsolute(url) {
-  // queueUrl dari Location biasanya absolute; pakai axios langsung
-  const res = await axios.get(url, {
-    auth: { username: config.jenkins.user, password: config.jenkins.token },
-    timeout: 30000,
-    headers: { accept: "application/json" },
-  });
-  return res.data;
 }
 
 export async function waitForBuildFromQueue(queueUrl) {
@@ -79,9 +87,7 @@ export async function waitForBuildFromQueue(queueUrl) {
 
     const q = await getJsonAbsolute(`${queueUrl}api/json`);
 
-    if (q.cancelled) {
-      throw new Error(`Queue item cancelled: ${queueUrl}`);
-    }
+    if (q.cancelled) throw new Error(`Queue item cancelled: ${queueUrl}`);
 
     if (q.executable?.url && q.executable?.number != null) {
       return {
@@ -94,37 +100,61 @@ export async function waitForBuildFromQueue(queueUrl) {
   }
 }
 
-export async function waitForBuildResult(buildUrl) {
+/**
+ * Ambil status build saat ini (tanpa menunggu).
+ * return:
+ *  - { state: "BUILDING" }
+ *  - { state: "AWAITING_APPROVAL", approval: {...} }
+ *  - { state: "FINISHED", result: "SUCCESS"|"FAILURE"|... }
+ */
+export async function getBuildState(buildUrl) {
+  // gunakan tree supaya payload kecil
+  const url = `${buildUrl}api/json?tree=building,result,actions[_class,inputs[id,message,proceedText,url]]`;
+  const b = await getJsonAbsolute(url);
+
+  const approval = extractApprovalInfo(b);
+  if (approval) {
+    return { state: "AWAITING_APPROVAL", approval };
+  }
+
+  if (b.building) return { state: "BUILDING" };
+
+  return { state: "FINISHED", result: b.result || "UNKNOWN" };
+}
+
+/**
+ * Tunggu sampai FINISHED atau (opsional) berhenti saat approval.
+ */
+export async function waitForBuildFinalOrApproval(buildUrl, { stopOnApproval } = { stopOnApproval: false }) {
   const startedAt = Date.now();
 
   while (true) {
     if (Date.now() - startedAt > config.jenkins.jobTimeoutMs) {
-      throw new Error(`Timeout waiting build result: ${buildUrl}`);
+      throw new Error(`Timeout waiting build state: ${buildUrl}`);
     }
 
-    const b = await getJsonAbsolute(`${buildUrl}api/json`);
-    if (b.building === false) {
-      return {
-        result: b.result, // SUCCESS / FAILURE / ABORTED
-        duration: b.duration,
-        timestamp: b.timestamp,
-      };
-    }
+    const state = await getBuildState(buildUrl);
+
+    if (state.state === "AWAITING_APPROVAL" && stopOnApproval) return state;
+    if (state.state === "FINISHED") return state;
 
     await sleep(config.jenkins.pollIntervalMs);
   }
 }
 
-export async function runJobAndWait(jobNameOrPath, paramsObj) {
+export async function runJobAndWait(jobNameOrPath, paramsObj, opts = {}) {
+  const { stopOnApproval = false } = opts;
+
   const { queueUrl } = await triggerJob(jobNameOrPath, paramsObj);
   const { buildUrl, buildNumber } = await waitForBuildFromQueue(queueUrl);
-  const final = await waitForBuildResult(buildUrl);
+
+  const finalState = await waitForBuildFinalOrApproval(buildUrl, { stopOnApproval });
 
   return {
     job: jobNameOrPath,
     queueUrl,
     buildUrl,
     buildNumber,
-    ...final,
+    ...finalState, // state/result/approval
   };
 }
