@@ -57,3 +57,29 @@ export async function getJenkinsBuildStatus(buildUrl) {
   if (!res.ok) throw new Error(toErrorMessage(res, payload));
   return payload;
 }
+
+export async function fetchCredentials(q = "") {
+  const u = new URL("/api/credentials", window.location.origin);
+  if (q) u.searchParams.set("q", q);
+
+  const res = await fetch(u.toString());
+  const payload = await readBody(res);
+  if (!res.ok) throw new Error(toErrorMessage(res, payload));
+  return payload.data || [];
+}
+
+export async function promoteCredentials(ids) {
+  const res = await fetch("/api/credentials/promote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+
+  const payload = await readBody(res);
+  if (!res.ok) {
+    const err = new Error(toErrorMessage(res, payload));
+    err.payload = payload;
+    throw err;
+  }
+  return payload; // { state, steps }
+}

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchWorkflows,
-  getJenkinsBuildStatus,
   pushWorkflowToGit,
   pushWorkflowToProd,
+  getJenkinsBuildStatus,
+  fetchCredentials,
+  promoteCredentials,
 } from "./api";
 
 function formatDate(iso) {
@@ -28,7 +30,8 @@ function statusColor(state) {
   }
 }
 
-export default function App() {
+/** ---------------- Workflows Page ---------------- */
+function WorkflowsPage() {
   const [workflows, setWorkflows] = useState([]);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState({}); // { [id]: { git?:bool, prod?:bool } }
@@ -61,13 +64,12 @@ export default function App() {
     setBusy((b) => ({ ...b, [id]: { ...(b[id] || {}), [key]: val } }));
   }
 
-  function startPollingIfNeeded(id, step2BuildUrl) {
+  function startPollingIfNeeded(id, buildUrl) {
     if (pollersRef.current[id]) return;
 
     const intervalId = setInterval(async () => {
       try {
-        const st = await getJenkinsBuildStatus(step2BuildUrl);
-
+        const st = await getJenkinsBuildStatus(buildUrl);
         if (st.state === "AWAITING_APPROVAL") {
           setDeploy((d) => ({
             ...d,
@@ -75,7 +77,6 @@ export default function App() {
           }));
           return;
         }
-
         if (st.state === "FINISHED") {
           setDeploy((d) => ({
             ...d,
@@ -100,12 +101,17 @@ export default function App() {
   async function onPushGit(id) {
     setBusyFlag(id, "git", true);
     setDeploy((d) => ({ ...d, [id]: { state: "RUNNING", label: "Pushing to Git...", steps: [] } }));
-
     try {
       const result = await pushWorkflowToGit(id);
-      setDeploy((d) => ({ ...d, [id]: { state: "SUCCESS", label: "Pushed to Git", steps: result.steps || [] } }));
+      setDeploy((d) => ({
+        ...d,
+        [id]: { state: "SUCCESS", label: "Pushed to Git", steps: result.steps || [] },
+      }));
     } catch (e) {
-      setDeploy((d) => ({ ...d, [id]: { state: "FAILED", label: e.message || "Push to Git failed", steps: e?.payload?.steps || [] } }));
+      setDeploy((d) => ({
+        ...d,
+        [id]: { state: "FAILED", label: e.message || "Push to Git failed", steps: e?.payload?.steps || [] },
+      }));
     } finally {
       setBusyFlag(id, "git", false);
     }
@@ -114,7 +120,6 @@ export default function App() {
   async function onPushProd(id) {
     setBusyFlag(id, "prod", true);
     setDeploy((d) => ({ ...d, [id]: { state: "RUNNING", label: "Promoting to prod...", steps: [] } }));
-
     try {
       const result = await pushWorkflowToProd(id);
       const steps = result.steps || [];
@@ -128,11 +133,359 @@ export default function App() {
 
       setDeploy((d) => ({ ...d, [id]: { state: "SUCCESS", label: "Deployed to prod", steps } }));
     } catch (e) {
-      setDeploy((d) => ({ ...d, [id]: { state: "FAILED", label: e.message || "Push to prod failed", steps: e?.payload?.steps || [] } }));
+      setDeploy((d) => ({
+        ...d,
+        [id]: { state: "FAILED", label: e.message || "Push to prod failed", steps: e?.payload?.steps || [] },
+      }));
     } finally {
       setBusyFlag(id, "prod", false);
     }
   }
+
+  return (
+    <>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold text-slate-900">Workflows</h1>
+        <span className="text-xs font-semibold px-3 py-1 rounded-full border border-green-200 bg-green-50 text-green-700">
+          System Operational
+        </span>
+      </div>
+
+      <section className="bg-white border border-slate-200 rounded-2xl">
+        <div className="p-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 font-bold text-slate-900">
+            <span className="text-red-500">⟟</span> Dev Workflows
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="relative w-[320px]">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔎</span>
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search workflows..."
+                className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-slate-200"
+              />
+            </div>
+
+            <button
+              onClick={() => load()}
+              className="px-4 py-2 text-sm font-semibold rounded-xl border border-slate-200 bg-white hover:bg-slate-50"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {/* Table: center semua, name isi left */}
+        <div className="border-t border-slate-200">
+          <div className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 text-xs font-bold text-slate-500 text-center">
+            <div>Status</div>
+            <div>Name</div>
+            <div>Last Updated</div>
+            <div>Actions</div>
+            <div>Keterangan</div>
+          </div>
+
+          <div className="divide-y divide-slate-200">
+            {filtered.map((w) => {
+              const d = deploy[w.id];
+              const isActive = !!w.active;
+
+              const buildLinks =
+                Array.isArray(d?.steps)
+                  ? d.steps
+                      .filter((s) => s?.buildUrl)
+                      .map((s, idx) => ({
+                        label: idx === 0 ? "Dev→Git build" : "Deploy build",
+                        url: s.buildUrl,
+                      }))
+                  : [];
+
+              return (
+                <div
+                  key={w.id}
+                  className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 items-center text-center"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    <span className={`h-2.5 w-2.5 rounded-full ${isActive ? "bg-green-500" : "bg-slate-300"}`} />
+                    <span className={`text-sm font-semibold ${isActive ? "text-green-700" : "text-slate-500"}`}>
+                      {isActive ? "Active" : "Inactive"}
+                    </span>
+                  </div>
+
+                  <div className="text-left">
+                    <div className="text-sm font-extrabold text-slate-900">{w.name}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      <span className="font-mono">ID: {w.id}</span>
+                    </div>
+                  </div>
+
+                  <div className="text-sm text-slate-700">{formatDate(w.updatedAt)}</div>
+
+                  <div className="flex items-center justify-center gap-3">
+                    <button
+                      onClick={() => onPushGit(w.id)}
+                      disabled={!!busy[w.id]?.git}
+                      className="px-4 py-2 text-sm font-bold rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {busy[w.id]?.git ? "Pushing..." : "Push to Git"}
+                    </button>
+
+                    <button
+                      onClick={() => onPushProd(w.id)}
+                      disabled={!!busy[w.id]?.prod}
+                      className="px-4 py-2 text-sm font-bold rounded-xl bg-green-600 text-white hover:bg-green-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {busy[w.id]?.prod ? "Promoting..." : "Push to Prod"}
+                    </button>
+                  </div>
+
+                  <div className="text-sm">
+                    {!d?.label ? (
+                      <span className="text-slate-400">—</span>
+                    ) : (
+                      <div className="flex flex-col items-center gap-1">
+                        <span className={`font-semibold ${statusColor(d.state)}`}>{d.label}</span>
+
+                        {buildLinks.length > 0 ? (
+                          <div className="text-xs flex flex-wrap justify-center gap-x-3 gap-y-1">
+                            {buildLinks.slice(0, 2).map((b, idx) => (
+                              <a
+                                key={idx}
+                                href={b.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-600 hover:underline"
+                              >
+                                {b.label}
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+    </>
+  );
+}
+
+/** ---------------- Credentials Page ---------------- */
+function CredentialsPage() {
+  const [creds, setCreds] = useState([]);
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState({}); // { [id]: bool }
+  const [promoteState, setPromoteState] = useState({}); // { [id]: {label, state, steps} }
+  const pollersRef = useRef({}); // { [id]: intervalId }
+
+  async function load() {
+    const data = await fetchCredentials(q);
+    setCreds(data);
+  }
+
+  useEffect(() => {
+    load().catch(console.error);
+    return () => {
+      for (const k of Object.keys(pollersRef.current)) clearInterval(pollersRef.current[k]);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // reload when q changes (debounce simpel)
+  useEffect(() => {
+    const t = setTimeout(() => load().catch(console.error), 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+
+  function startPollingIfNeeded(id, buildUrl) {
+    if (pollersRef.current[id]) return;
+
+    const intervalId = setInterval(async () => {
+      try {
+        const st = await getJenkinsBuildStatus(buildUrl);
+
+        if (st.state === "AWAITING_APPROVAL") {
+          setPromoteState((p) => ({
+            ...p,
+            [id]: { ...(p[id] || {}), state: "AWAITING_APPROVAL", label: "Awaiting approval" },
+          }));
+          return;
+        }
+
+        if (st.state === "FINISHED") {
+          setPromoteState((p) => ({
+            ...p,
+            [id]: {
+              ...(p[id] || {}),
+              state: st.result === "SUCCESS" ? "SUCCESS" : "FAILED",
+              label: st.result === "SUCCESS" ? "Promoted to prod" : `Promote failed: ${st.result}`,
+            },
+          }));
+          clearInterval(intervalId);
+          delete pollersRef.current[id];
+        }
+      } catch {
+        clearInterval(intervalId);
+        delete pollersRef.current[id];
+      }
+    }, 2500);
+
+    pollersRef.current[id] = intervalId;
+  }
+
+  async function onPromote(id) {
+    setBusy((b) => ({ ...b, [id]: true }));
+    setPromoteState((p) => ({ ...p, [id]: { state: "RUNNING", label: "Promoting...", steps: [] } }));
+
+    try {
+      const result = await promoteCredentials([id]); // single id promote
+      const steps = result.steps || [];
+      const step = steps[0];
+
+      if (result.state === "AWAITING_APPROVAL") {
+        setPromoteState((p) => ({ ...p, [id]: { state: "AWAITING_APPROVAL", label: "Awaiting approval", steps } }));
+        if (step?.buildUrl) startPollingIfNeeded(id, step.buildUrl);
+        return;
+      }
+
+      setPromoteState((p) => ({ ...p, [id]: { state: "SUCCESS", label: "Promoted to prod", steps } }));
+    } catch (e) {
+      setPromoteState((p) => ({
+        ...p,
+        [id]: { state: "FAILED", label: e.message || "Promote failed", steps: e?.payload?.steps || [] },
+      }));
+    } finally {
+      setBusy((b) => ({ ...b, [id]: false }));
+    }
+  }
+
+  return (
+    <>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold text-slate-900">Credentials</h1>
+        <span className="text-xs font-semibold px-3 py-1 rounded-full border border-green-200 bg-green-50 text-green-700">
+          System Operational
+        </span>
+      </div>
+
+      <section className="bg-white border border-slate-200 rounded-2xl">
+        <div className="p-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 font-bold text-slate-900">
+            <span className="text-amber-600">🔒</span> Dev Credentials
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="relative w-[320px]">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔎</span>
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search credentials..."
+                className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-slate-200"
+              />
+            </div>
+
+            <button
+              onClick={() => load()}
+              className="px-4 py-2 text-sm font-semibold rounded-xl border border-slate-200 bg-white hover:bg-slate-50"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {/* Table: center semua, name isi left */}
+        <div className="border-t border-slate-200">
+          <div className="grid grid-cols-[140px_1fr_180px_220px_260px] gap-3 px-4 py-3 text-xs font-bold text-slate-500 text-center">
+            <div>Type</div>
+            <div>Name</div>
+            <div>Last Updated</div>
+            <div>Actions</div>
+            <div>Keterangan</div>
+          </div>
+
+          <div className="divide-y divide-slate-200">
+            {creds.map((c) => {
+              const st = promoteState[c.id];
+              const buildLinks =
+                Array.isArray(st?.steps)
+                  ? st.steps
+                      .filter((s) => s?.buildUrl)
+                      .map((s) => ({ label: "Promote build", url: s.buildUrl }))
+                  : [];
+
+              return (
+                <div
+                  key={c.id}
+                  className="grid grid-cols-[140px_1fr_180px_220px_260px] gap-3 px-4 py-3 items-center text-center"
+                >
+                  <div className="text-sm text-slate-700">{c.type || "—"}</div>
+
+                  <div className="text-left">
+                    <div className="text-sm font-extrabold text-slate-900">{c.name}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      <span className="font-mono">ID: {c.id}</span>
+                    </div>
+                  </div>
+
+                  <div className="text-sm text-slate-700">{formatDate(c.updatedAt)}</div>
+
+                  <div className="flex items-center justify-center gap-3">
+                    <button
+                      onClick={() => onPromote(c.id)}
+                      disabled={!!busy[c.id]}
+                      className="px-4 py-2 text-sm font-bold rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                      title="Promote credential(s) to prod via Jenkins"
+                    >
+                      {busy[c.id] ? "Promoting..." : "Promote"}
+                    </button>
+                  </div>
+
+                  <div className="text-sm">
+                    {!st?.label ? (
+                      <span className="text-slate-400">—</span>
+                    ) : (
+                      <div className="flex flex-col items-center gap-1">
+                        <span className={`font-semibold ${statusColor(st.state)}`}>{st.label}</span>
+
+                        {buildLinks.length > 0 ? (
+                          <div className="text-xs flex flex-wrap justify-center gap-x-3 gap-y-1">
+                            {buildLinks.slice(0, 1).map((b, idx) => (
+                              <a
+                                key={idx}
+                                href={b.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-600 hover:underline"
+                              >
+                                {b.label}
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+    </>
+  );
+}
+
+/** ---------------- App Layout + Nav ---------------- */
+export default function App() {
+  const [page, setPage] = useState("workflows"); // "workflows" | "credentials"
 
   return (
     <div className="min-h-screen bg-slate-50 flex">
@@ -146,15 +499,29 @@ export default function App() {
         </div>
 
         <nav className="px-3 flex flex-col gap-2">
-          <div className="px-3 py-2 rounded-xl bg-orange-500/15 border border-orange-500/30 flex items-center gap-3">
+          <button
+            onClick={() => setPage("workflows")}
+            className={`px-3 py-2 rounded-xl flex items-center gap-3 text-left ${
+              page === "workflows"
+                ? "bg-orange-500/15 border border-orange-500/30"
+                : "hover:bg-white/5 border border-transparent"
+            }`}
+          >
             <span className="text-sm">📄</span>
             <span className="text-sm font-semibold">Workflows</span>
-          </div>
+          </button>
 
-          <div className="px-3 py-2 rounded-xl opacity-60 cursor-not-allowed flex items-center gap-3">
+          <button
+            onClick={() => setPage("credentials")}
+            className={`px-3 py-2 rounded-xl flex items-center gap-3 text-left ${
+              page === "credentials"
+                ? "bg-orange-500/15 border border-orange-500/30"
+                : "hover:bg-white/5 border border-transparent"
+            }`}
+          >
             <span className="text-sm">🔒</span>
             <span className="text-sm font-semibold">Credentials</span>
-          </div>
+          </button>
         </nav>
 
         <div className="mt-auto p-4">
@@ -169,140 +536,7 @@ export default function App() {
       </aside>
 
       <main className="flex-1 p-6 overflow-x-auto">
-        <div className="flex items-center justify-between mb-4">
-          <h1 className="text-2xl font-bold text-slate-900">Workflows</h1>
-          <span className="text-xs font-semibold px-3 py-1 rounded-full border border-green-200 bg-green-50 text-green-700">
-            System Operational
-          </span>
-        </div>
-
-        <section className="bg-white border border-slate-200 rounded-2xl">
-          <div className="p-4 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-2 font-bold text-slate-900">
-              <span className="text-red-500">⟟</span> Dev Workflows
-            </div>
-
-            <div className="flex items-center gap-3">
-              <div className="relative w-[320px]">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔎</span>
-                <input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder="Search workflows..."
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-slate-200"
-                />
-              </div>
-
-              <button
-                onClick={() => load()}
-                className="px-4 py-2 text-sm font-semibold rounded-xl border border-slate-200 bg-white hover:bg-slate-50"
-              >
-                Refresh
-              </button>
-            </div>
-          </div>
-
-          {/* Table */}
-          <div className="border-t border-slate-200">
-            {/* Header */}
-            <div className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 text-xs font-bold text-slate-500 text-center">
-              <div>Status</div>
-              <div>Name</div>
-              <div>Last Updated</div>
-              <div>Actions</div>
-              <div>Details</div>
-            </div>
-          
-            <div className="divide-y divide-slate-200">
-              {filtered.map((w) => {
-                const d = deploy[w.id];
-                const isActive = !!w.active;
-              
-                const buildLinks =
-                  Array.isArray(d?.steps)
-                    ? d.steps
-                        .filter((s) => s?.buildUrl)
-                        .map((s, idx) => ({
-                          label: idx === 0 ? "Dev→Git build" : "Deploy build",
-                          url: s.buildUrl,
-                        }))
-                    : [];
-                      
-                return (
-                  <div
-                    key={w.id}
-                    className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 items-center"
-                  >
-                    {/* Status */}
-                    <div className="flex items-center gap-2 justify-center">
-                      <span className={`h-2.5 w-2.5 rounded-full ${isActive ? "bg-green-500" : "bg-slate-300"}`} />
-                      <span className={`text-sm font-semibold ${isActive ? "text-green-700" : "text-slate-500"}`}>
-                        {isActive ? "Active" : "Inactive"}
-                      </span>
-                    </div>
-              
-                    {/* Name */}
-                    <div>
-                      <div className="text-sm font-extrabold text-slate-900">{w.name}</div>
-                      <div className="text-xs text-slate-500 mt-0.5">
-                        <span className="font-mono">ID: {w.id}</span>
-                      </div>
-                    </div>
-              
-                    {/* Updated */}
-                    <div className="text-sm text-slate-700 items-center text-center">{formatDate(w.updatedAt)}</div>
-              
-                    {/* Actions (tombol saja, sejajar) */}
-                    <div className="flex items-center justify-center gap-3 ">
-                      <button
-                        onClick={() => onPushGit(w.id)}
-                        disabled={!!busy[w.id]?.git}
-                        className="px-4 py-2 text-sm font-bold rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed"
-                      >
-                        {busy[w.id]?.git ? "Pushing..." : "Push to Git"}
-                      </button>
-              
-                      <button
-                        onClick={() => onPushProd(w.id)}
-                        disabled={!!busy[w.id]?.prod}
-                        className="px-4 py-2 text-sm font-bold rounded-xl bg-green-600 text-white hover:bg-green-700 disabled:opacity-60 disabled:cursor-not-allowed"
-                      >
-                        {busy[w.id]?.prod ? "Promoting..." : "Push to Prod"}
-                      </button>
-                    </div>
-              
-                    {/* Keterangan (kolom khusus) */}
-                    <div className="text-sm text-center">
-                      {!d?.label ? (
-                        <span className="text-slate-400">—</span>
-                      ) : (
-                        <div className="flex flex-col gap-1">
-                          <span className={`font-semibold ${statusColor(d.state)}`}>{d.label}</span>
-                      
-                          {buildLinks.length > 0 ? (
-                            <div className="text-xs">
-                              {buildLinks.slice(0, 2).map((b, idx) => (
-                                <a
-                                  key={idx}
-                                  href={b.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-blue-600 hover:underline mr-3"
-                                >
-                                  {b.label}
-                                </a>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </section>
+        {page === "workflows" ? <WorkflowsPage /> : <CredentialsPage />}
       </main>
     </div>
   );
