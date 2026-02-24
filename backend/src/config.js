@@ -26,5 +26,16 @@ export const config = {
     workflowParam: process.env.JENKINS_WORKFLOW_PARAM || "WORKFLOW_ID",
     pollIntervalMs: Number(process.env.JENKINS_POLL_INTERVAL_MS || 2000),
     jobTimeoutMs: Number(process.env.JENKINS_JOB_TIMEOUT_MS || 900000),
+    jobPromoteCreds: requireEnv("JENKINS_JOB_PROMOTE_CREDS"),
+    credIdsParam: process.env.JENKINS_CRED_IDS_PARAM || "CRED_IDS",
+  },
+
+  db: {
+    host: requireEnv("N8N_DEV_DB_HOST"),
+    port: Number(process.env.N8N_DEV_DB_PORT || 5432),
+    database: requireEnv("N8N_DEV_DB_NAME"),
+    user: requireEnv("N8N_DEV_DB_USER"),
+    password: requireEnv("N8N_DEV_DB_PASSWORD"),
+    ssl: String(process.env.N8N_DEV_DB_SSL || "false").toLowerCase() === "true",
   },
 };
