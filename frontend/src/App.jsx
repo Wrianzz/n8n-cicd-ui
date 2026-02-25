@@ -181,31 +181,6 @@ function WorkflowsPage() {
     } catch (e) {
       setDeploy((d) => ({
         ...d,
-        [id]: { state: "FAILED", label: e.message || "Push to Git failed", steps: e?.payload?.steps || [] },
-      }));
-    } finally {
-      setBusyFlag(id, "git", false);
-    }
-  }
-
-  async function onPullFromGit(id) {
-    setBusyFlag(id, "pull", true);
-    setDeploy((d) => ({ ...d, [id]: { state: "RUNNING", label: "Pulling from Git to prod...", steps: [] } }));
-    try {
-      const result = await pullWorkflowFromGit(id);
-      const steps = result.steps || [];
-      const waitingStep = steps.find((step) => step?.state === "AWAITING_APPROVAL");
-
-      if (result.state === "AWAITING_APPROVAL") {
-        setDeploy((d) => ({ ...d, [id]: { state: "AWAITING_APPROVAL", label: "Awaiting approval", steps } }));
-        if (waitingStep?.buildUrl) startPollingIfNeeded(id, waitingStep.buildUrl);
-        return;
-      }
-
-      setDeploy((d) => ({ ...d, [id]: { state: "SUCCESS", label: "Pulled from Git to prod", steps } }));
-    } catch (e) {
-      setDeploy((d) => ({
-        ...d,
         [id]: { state: "FAILED", label: e.message || "Pull from Git failed", steps: e?.payload?.steps || [] },
       }));
     } finally {
@@ -342,7 +317,7 @@ function WorkflowsPage() {
                   : [];
 
               return (
-                <div key={w.id} className="grid grid-cols-[140px_1fr_150px_420px_240px] gap-3 px-4 py-3 items-center text-center">
+                <div key={w.id} className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 items-center text-center">
                   <div className="flex items-center justify-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${isActive ? "bg-green-500" : "bg-slate-300"}`} />
                     <span className={`text-sm font-semibold ${isActive ? "text-green-700" : "text-slate-500"}`}>
@@ -366,14 +341,6 @@ function WorkflowsPage() {
                       className="px-4 py-2 text-sm font-bold rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       {busy[w.id]?.git ? "Pushing..." : "Push to Git"}
-                    </button>
-
-                    <button
-                      onClick={() => onPullFromGit(w.id)}
-                      disabled={!!busy[w.id]?.pull}
-                      className="px-4 py-2 text-sm font-bold rounded-xl bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-60 disabled:cursor-not-allowed"
-                    >
-                      {busy[w.id]?.pull ? "Pulling..." : "Pull from Git"}
                     </button>
 
                     <button
@@ -572,23 +539,23 @@ function CredentialsPage() {
                   </div>
 
                   <div className="text-sm">
-                    <div className="flex flex-col items-center gap-1">
-                      <span className={`font-semibold ${c.inProduction ? "text-green-700" : "text-red-700"}`}>
-                        {c.inProduction ? "Already in Production" : "Not in Production"}
-                      </span>
+                    {!st?.label ? (
+                      <span className="text-slate-400">—</span>
+                    ) : (
+                      <div className="flex flex-col items-center gap-1">
+                        <span className={`font-semibold ${statusColor(st.state)}`}>{st.label}</span>
 
-                      {st?.label ? <span className={`text-xs ${statusColor(st.state)}`}>{st.label}</span> : null}
-
-                      {buildLinks.length > 0 ? (
-                        <div className="text-xs flex flex-wrap justify-center gap-x-3 gap-y-1">
-                          {buildLinks.slice(0, 1).map((b, idx) => (
-                            <a key={idx} href={b.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
-                              {b.label}
-                            </a>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
+                        {buildLinks.length > 0 ? (
+                          <div className="text-xs flex flex-wrap justify-center gap-x-3 gap-y-1">
+                            {buildLinks.slice(0, 1).map((b, idx) => (
+                              <a key={idx} href={b.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+                                {b.label}
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                   </div>
                 </div>
               );

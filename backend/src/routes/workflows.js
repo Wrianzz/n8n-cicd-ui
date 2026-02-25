@@ -74,22 +74,6 @@ async function getWorkflowMissingCredentials(workflowId) {
   };
 }
 
-async function runPromoteMissingCredentials(missingCredentials, steps) {
-  if (missingCredentials.length === 0) return { state: "SUCCESS" };
-
-  const missingIds = missingCredentials.map((c) => c.id);
-  const promoteParams = { [config.jenkins.credIdsParam]: missingIds.join(",") };
-  const promoteStep = await runJobAndWait(config.jenkins.jobPromoteCreds, promoteParams, {
-    stopOnApproval: true,
-  });
-  steps.push({ ...promoteStep, label: "PROMOTE_CREDS", credentials: missingCredentials });
-
-  if (promoteStep.state === "AWAITING_APPROVAL") return { state: "AWAITING_APPROVAL" };
-  if (promoteStep.state !== "FINISHED" || promoteStep.result !== "SUCCESS") return { state: "FAILED" };
-
-  return { state: "SUCCESS" };
-}
-
 workflowsRouter.get("/", async (req, res) => {
   try {
     const workflows = await listAllWorkflows();
@@ -131,12 +115,21 @@ workflowsRouter.post("/:id/push", async (req, res) => {
     const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
     const steps = [];
 
-    const promoteStatus = await runPromoteMissingCredentials(missingCredentials, steps);
-    if (promoteStatus.state === "AWAITING_APPROVAL") {
-      return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
-    }
-    if (promoteStatus.state === "FAILED") {
-      return res.status(500).json({ error: "PROMOTE_CREDS failed", missingCredentials, steps });
+    if (missingCredentials.length > 0) {
+      const missingIds = missingCredentials.map((c) => c.id);
+      const promoteParams = { [config.jenkins.credIdsParam]: missingIds.join(",") };
+      const promoteStep = await runJobAndWait(config.jenkins.jobPromoteCreds, promoteParams, {
+        stopOnApproval: true,
+      });
+      steps.push({ ...promoteStep, label: "PROMOTE_CREDS", credentials: missingCredentials });
+
+      if (promoteStep.state === "AWAITING_APPROVAL") {
+        return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
+      }
+
+      if (promoteStep.state !== "FINISHED" || promoteStep.result !== "SUCCESS") {
+        return res.status(500).json({ error: "PROMOTE_CREDS failed", missingCredentials, steps });
+      }
     }
 
     const step1 = await runJobAndWait(config.jenkins.jobDevToGit, params);
@@ -153,39 +146,6 @@ workflowsRouter.post("/:id/push", async (req, res) => {
     }
 
     if (step2.state !== "FINISHED" || step2.result !== "SUCCESS") {
-      return res.status(500).json({ error: "DEPLOY_FROM_GIT failed", missingCredentials, steps });
-    }
-
-    res.json({ workflowId, state: "SUCCESS", missingCredentials, steps });
-  } catch (e) {
-    res.status(500).json({ error: String(e?.message || e) });
-  }
-});
-
-workflowsRouter.post("/:id/pull-git", async (req, res) => {
-  const workflowId = req.params.id;
-  const params = { [config.jenkins.workflowParam]: workflowId };
-
-  try {
-    const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
-    const steps = [];
-
-    const promoteStatus = await runPromoteMissingCredentials(missingCredentials, steps);
-    if (promoteStatus.state === "AWAITING_APPROVAL") {
-      return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
-    }
-    if (promoteStatus.state === "FAILED") {
-      return res.status(500).json({ error: "PROMOTE_CREDS failed", missingCredentials, steps });
-    }
-
-    const deployStep = await runJobAndWait(config.jenkins.jobDeployFromGit, params, { stopOnApproval: true });
-    steps.push({ ...deployStep, label: "DEPLOY_FROM_GIT" });
-
-    if (deployStep.state === "AWAITING_APPROVAL") {
-      return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
-    }
-
-    if (deployStep.state !== "FINISHED" || deployStep.result !== "SUCCESS") {
       return res.status(500).json({ error: "DEPLOY_FROM_GIT failed", missingCredentials, steps });
     }
 
