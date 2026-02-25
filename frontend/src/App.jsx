@@ -3,6 +3,7 @@ import {
   fetchWorkflows,
   fetchWorkflowCredentialsDiff,
   pushWorkflowToGit,
+  pullWorkflowFromGit,
   pushWorkflowToProd,
   getJenkinsBuildStatus,
   fetchCredentials,
@@ -180,10 +181,10 @@ function WorkflowsPage() {
     } catch (e) {
       setDeploy((d) => ({
         ...d,
-        [id]: { state: "FAILED", label: e.message || "Push to Git failed", steps: e?.payload?.steps || [] },
+        [id]: { state: "FAILED", label: e.message || "Pull from Git failed", steps: e?.payload?.steps || [] },
       }));
     } finally {
-      setBusyFlag(id, "git", false);
+      setBusyFlag(id, "pull", false);
     }
   }
 
@@ -293,7 +294,7 @@ function WorkflowsPage() {
         </div>
 
         <div className="border-t border-slate-200">
-          <div className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 text-xs font-bold text-slate-500 text-center">
+          <div className="grid grid-cols-[140px_1fr_150px_420px_240px] gap-3 px-4 py-3 text-xs font-bold text-slate-500 text-center">
             <div>Status</div>
             <div>Name</div>
             <div>Last Updated</div>
@@ -504,7 +505,7 @@ function CredentialsPage() {
             <div>Name</div>
             <div>Last Updated</div>
             <div>Actions</div>
-            <div>Keterangan</div>
+            <div>Status</div>
           </div>
 
           <div className="divide-y divide-slate-200">
