@@ -3,13 +3,18 @@ import { config } from "../config.js";
 
 const { Pool } = pg;
 
-export const pool = new Pool({
-  host: config.db.host,
-  port: config.db.port,
-  database: config.db.database,
-  user: config.db.user,
-  password: config.db.password,
-  ssl: config.db.ssl ? { rejectUnauthorized: false } : false,
-  max: 5,
-  idleTimeoutMillis: 30000,
-});
+function createPool(dbConfig) {
+  return new Pool({
+    host: dbConfig.host,
+    port: dbConfig.port,
+    database: dbConfig.database,
+    user: dbConfig.user,
+    password: dbConfig.password,
+    ssl: dbConfig.ssl ? { rejectUnauthorized: false } : false,
+    max: 5,
+    idleTimeoutMillis: 30000,
+  });
+}
+
+export const pool = createPool(config.db);
+export const prodPool = createPool(config.prodDb);

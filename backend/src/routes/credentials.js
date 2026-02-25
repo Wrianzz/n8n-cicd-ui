@@ -1,11 +1,10 @@
 import express from "express";
-import { pool } from "../clients/db.js";
+import { pool, prodPool } from "../clients/db.js";
 import { runJobAndWait } from "../clients/jenkins.js";
 import { config } from "../config.js";
 
 export const credentialsRouter = express.Router();
 
-// List credential metadata (no secrets)
 credentialsRouter.get("/", async (req, res) => {
   const q = String(req.query.q || "").trim();
 
@@ -28,13 +27,29 @@ credentialsRouter.get("/", async (req, res) => {
     const params = q ? [`%${q}%`] : [];
     const { rows } = await pool.query(sql, params);
 
+    const ids = rows.map((r) => String(r.id));
+    let prodIdSet = new Set();
+
+    if (ids.length > 0) {
+      const { rows: prodRows } = await prodPool.query(
+        `
+          SELECT CAST(id AS TEXT) AS id
+          FROM public.credentials_entity
+          WHERE CAST(id AS TEXT) = ANY($1::text[]);
+        `,
+        [ids]
+      );
+      prodIdSet = new Set(prodRows.map((r) => String(r.id)));
+    }
+
     res.json({
       data: rows.map((r) => ({
-        id: r.id,
+        id: String(r.id),
         name: r.name,
         type: r.type,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
+        inProduction: prodIdSet.has(String(r.id)),
       })),
     });
   } catch (e) {
@@ -42,7 +57,6 @@ credentialsRouter.get("/", async (req, res) => {
   }
 });
 
-// Promote credentials by IDs via Jenkins (CRED_IDS=id1,id2,...)
 credentialsRouter.post("/promote", async (req, res) => {
   try {
     const ids = Array.isArray(req.body?.ids)

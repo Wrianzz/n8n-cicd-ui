@@ -38,4 +38,13 @@ export const config = {
     password: requireEnv("N8N_DEV_DB_PASSWORD"),
     ssl: String(process.env.N8N_DEV_DB_SSL || "false").toLowerCase() === "true",
   },
+
+  prodDb: {
+    host: requireEnv("N8N_PROD_DB_HOST"),
+    port: Number(process.env.N8N_PROD_DB_PORT || 5432),
+    database: requireEnv("N8N_PROD_DB_NAME"),
+    user: requireEnv("N8N_PROD_DB_USER"),
+    password: requireEnv("N8N_PROD_DB_PASSWORD"),
+    ssl: String(process.env.N8N_PROD_DB_SSL || "false").toLowerCase() === "true",
+  },
 };
