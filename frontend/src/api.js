@@ -45,6 +45,10 @@ export async function pushWorkflowToGit(workflowId) {
   return await request(`/api/workflows/${encodeURIComponent(workflowId)}/push-git`, { method: "POST" });
 }
 
+export async function pullWorkflowFromGit(workflowId) {
+  return await request(`/api/workflows/${encodeURIComponent(workflowId)}/pull-git`, { method: "POST" });
+}
+
 export async function getJenkinsBuildStatus(buildUrl) {
   const u = new URL("/api/jenkins/build-status", window.location.origin);
   u.searchParams.set("buildUrl", buildUrl);

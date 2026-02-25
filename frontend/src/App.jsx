@@ -3,6 +3,7 @@ import {
   fetchWorkflows,
   fetchWorkflowCredentialsDiff,
   pushWorkflowToGit,
+  pullWorkflowFromGit,
   pushWorkflowToProd,
   getJenkinsBuildStatus,
   fetchCredentials,
@@ -140,7 +141,7 @@ function WorkflowsPage() {
     setBusy((b) => ({ ...b, [id]: { ...(b[id] || {}), [key]: val } }));
   }
 
-  function startPollingIfNeeded(id, buildUrl) {
+  function startPollingIfNeeded(id, buildUrl, labels = {}) {
     if (pollersRef.current[id]) return;
 
     const intervalId = setInterval(async () => {
@@ -156,7 +157,7 @@ function WorkflowsPage() {
             [id]: {
               ...(d[id] || {}),
               state: st.result === "SUCCESS" ? "SUCCESS" : "FAILED",
-              label: st.result === "SUCCESS" ? "Deployed to prod" : `Deploy failed: ${st.result}`,
+              label: st.result === "SUCCESS" ? labels.success || "Deployed to prod" : `${labels.failedPrefix || "Deploy failed"}: ${st.result}`,
             },
           }));
           clearInterval(intervalId);
@@ -187,6 +188,31 @@ function WorkflowsPage() {
     }
   }
 
+  async function onPullFromGit(id) {
+    setBusyFlag(id, "pull", true);
+    setDeploy((d) => ({ ...d, [id]: { state: "RUNNING", label: "Pulling from Git...", steps: [] } }));
+    try {
+      const result = await pullWorkflowFromGit(id);
+      const steps = result.steps || [];
+      const waitingStep = steps.find((step) => step?.state === "AWAITING_APPROVAL");
+
+      if (result.state === "AWAITING_APPROVAL") {
+        setDeploy((d) => ({ ...d, [id]: { state: "AWAITING_APPROVAL", label: "Awaiting approval", steps } }));
+        if (waitingStep?.buildUrl) startPollingIfNeeded(id, waitingStep.buildUrl, { success: "Pulled from Git", failedPrefix: "Pull failed" });
+        return;
+      }
+
+      setDeploy((d) => ({ ...d, [id]: { state: "SUCCESS", label: "Pulled from Git", steps } }));
+    } catch (e) {
+      setDeploy((d) => ({
+        ...d,
+        [id]: { state: "FAILED", label: e.message || "Pull from Git failed", steps: e?.payload?.steps || [] },
+      }));
+    } finally {
+      setBusyFlag(id, "pull", false);
+    }
+  }
+
   async function runPushProd(id) {
     setBusyFlag(id, "prod", true);
     setDeploy((d) => ({ ...d, [id]: { state: "RUNNING", label: "Promoting to prod...", steps: [] } }));
@@ -197,7 +223,7 @@ function WorkflowsPage() {
 
       if (result.state === "AWAITING_APPROVAL") {
         setDeploy((d) => ({ ...d, [id]: { state: "AWAITING_APPROVAL", label: "Awaiting approval", steps } }));
-        if (waitingStep?.buildUrl) startPollingIfNeeded(id, waitingStep.buildUrl);
+        if (waitingStep?.buildUrl) startPollingIfNeeded(id, waitingStep.buildUrl, { success: "Deployed to prod", failedPrefix: "Deploy failed" });
         return;
       }
 
@@ -293,7 +319,7 @@ function WorkflowsPage() {
         </div>
 
         <div className="border-t border-slate-200">
-          <div className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 text-xs font-bold text-slate-500 text-center">
+          <div className="grid grid-cols-[160px_1fr_160px_460px_260px] gap-3 px-4 py-3 text-xs font-bold text-slate-500 text-center">
             <div>Status</div>
             <div>Name</div>
             <div>Last Updated</div>
@@ -316,7 +342,7 @@ function WorkflowsPage() {
                   : [];
 
               return (
-                <div key={w.id} className="grid grid-cols-[160px_1fr_160px_300px_260px] gap-3 px-4 py-3 items-center text-center">
+                <div key={w.id} className="grid grid-cols-[160px_1fr_160px_460px_260px] gap-3 px-4 py-3 items-center text-center">
                   <div className="flex items-center justify-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${isActive ? "bg-green-500" : "bg-slate-300"}`} />
                     <span className={`text-sm font-semibold ${isActive ? "text-green-700" : "text-slate-500"}`}>
@@ -340,6 +366,14 @@ function WorkflowsPage() {
                       className="px-4 py-2 text-sm font-bold rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       {busy[w.id]?.git ? "Pushing..." : "Push to Git"}
+                    </button>
+
+                    <button
+                      onClick={() => onPullFromGit(w.id)}
+                      disabled={!!busy[w.id]?.pull}
+                      className="px-4 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {busy[w.id]?.pull ? "Pulling..." : "Pull from Git"}
                     </button>
 
                     <button
@@ -404,7 +438,7 @@ function CredentialsPage() {
     return () => clearTimeout(t);
   }, [q]);
 
-  function startPollingIfNeeded(id, buildUrl) {
+  function startPollingIfNeeded(id, buildUrl, labels = {}) {
     if (pollersRef.current[id]) return;
 
     const intervalId = setInterval(async () => {
@@ -504,7 +538,7 @@ function CredentialsPage() {
             <div>Name</div>
             <div>Last Updated</div>
             <div>Actions</div>
-            <div>Keterangan</div>
+            <div>Status</div>
           </div>
 
           <div className="divide-y divide-slate-200">
@@ -538,23 +572,26 @@ function CredentialsPage() {
                   </div>
 
                   <div className="text-sm">
-                    {!st?.label ? (
-                      <span className="text-slate-400">—</span>
-                    ) : (
-                      <div className="flex flex-col items-center gap-1">
-                        <span className={`font-semibold ${statusColor(st.state)}`}>{st.label}</span>
+                    <div className="flex flex-col items-center gap-1">
+                      <span className={`font-semibold ${c.inProduction ? "text-green-700" : "text-red-700"}`}>
+                        {c.inProduction ? "Already in Production" : "Not in Production"}
+                      </span>
 
-                        {buildLinks.length > 0 ? (
-                          <div className="text-xs flex flex-wrap justify-center gap-x-3 gap-y-1">
-                            {buildLinks.slice(0, 1).map((b, idx) => (
-                              <a key={idx} href={b.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
-                                {b.label}
-                              </a>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    )}
+                      {st?.label ? (
+                        <>
+                          <span className={`text-xs ${statusColor(st.state)}`}>{st.label}</span>
+                          {buildLinks.length > 0 ? (
+                            <div className="text-xs flex flex-wrap justify-center gap-x-3 gap-y-1">
+                              {buildLinks.slice(0, 1).map((b, idx) => (
+                                <a key={idx} href={b.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+                                  {b.label}
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
               );

@@ -107,6 +107,49 @@ workflowsRouter.post("/:id/push-git", async (req, res) => {
   }
 });
 
+
+workflowsRouter.post("/:id/pull-git", async (req, res) => {
+  const workflowId = req.params.id;
+  const params = { [config.jenkins.workflowParam]: workflowId };
+
+  try {
+    const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
+    const steps = [];
+
+    if (missingCredentials.length > 0) {
+      const missingIds = missingCredentials.map((c) => c.id);
+      const promoteParams = { [config.jenkins.credIdsParam]: missingIds.join(",") };
+      const promoteStep = await runJobAndWait(config.jenkins.jobPromoteCreds, promoteParams, {
+        stopOnApproval: true,
+      });
+      steps.push({ ...promoteStep, label: "PROMOTE_CREDS", credentials: missingCredentials });
+
+      if (promoteStep.state === "AWAITING_APPROVAL") {
+        return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
+      }
+
+      if (promoteStep.state !== "FINISHED" || promoteStep.result !== "SUCCESS") {
+        return res.status(500).json({ error: "PROMOTE_CREDS failed", missingCredentials, steps });
+      }
+    }
+
+    const step = await runJobAndWait(config.jenkins.jobDeployFromGit, params, { stopOnApproval: true });
+    steps.push({ ...step, label: "DEPLOY_FROM_GIT" });
+
+    if (step.state === "AWAITING_APPROVAL") {
+      return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
+    }
+
+    if (step.state !== "FINISHED" || step.result !== "SUCCESS") {
+      return res.status(500).json({ error: "DEPLOY_FROM_GIT failed", missingCredentials, steps });
+    }
+
+    res.json({ workflowId, state: "SUCCESS", missingCredentials, steps });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
 workflowsRouter.post("/:id/push", async (req, res) => {
   const workflowId = req.params.id;
   const params = { [config.jenkins.workflowParam]: workflowId };
