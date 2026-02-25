@@ -1,10 +1,12 @@
 async function readBody(res) {
   const ct = (res.headers.get("content-type") || "").toLowerCase();
 
+  // JSON normal
   if (ct.includes("application/json")) {
     return await res.json();
   }
 
+  // Non-JSON (HTML/teks)
   const text = await res.text();
   return { __nonJson: true, text };
 }
@@ -17,8 +19,15 @@ function toErrorMessage(res, payload) {
   return payload?.error || `Request failed: ${res.status}`;
 }
 
-async function request(url, init) {
-  const res = await fetch(url, init);
+export async function fetchWorkflows() {
+  const res = await fetch("/api/workflows");
+  const payload = await readBody(res);
+  if (!res.ok) throw new Error(toErrorMessage(res, payload));
+  return payload.data || [];
+}
+
+export async function pushWorkflowToProd(workflowId) {
+  const res = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/push`, { method: "POST" });
   const payload = await readBody(res);
   if (!res.ok) {
     const err = new Error(toErrorMessage(res, payload));
@@ -28,41 +37,23 @@ async function request(url, init) {
   return payload;
 }
 
-export async function fetchWorkflows() {
-  const payload = await request("/api/workflows");
-  return payload.data || [];
-}
-
-export async function fetchWorkflowCredentialsDiff(workflowId) {
-  return await request(`/api/workflows/${encodeURIComponent(workflowId)}/credentials-diff`);
-}
-
-export async function pushWorkflowToProd(workflowId) {
-  return await request(`/api/workflows/${encodeURIComponent(workflowId)}/push`, { method: "POST" });
-}
-
 export async function pushWorkflowToGit(workflowId) {
-  return await request(`/api/workflows/${encodeURIComponent(workflowId)}/push-git`, { method: "POST" });
+  const res = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/push-git`, { method: "POST" });
+  const payload = await readBody(res);
+  if (!res.ok) {
+    const err = new Error(toErrorMessage(res, payload));
+    err.payload = payload;
+    throw err;
+  }
+  return payload;
 }
 
 export async function getJenkinsBuildStatus(buildUrl) {
   const u = new URL("/api/jenkins/build-status", window.location.origin);
   u.searchParams.set("buildUrl", buildUrl);
-  return await request(u.toString());
-}
 
-export async function fetchCredentials(q = "") {
-  const u = new URL("/api/credentials", window.location.origin);
-  if (q) u.searchParams.set("q", q);
-
-  const payload = await request(u.toString());
-  return payload.data || [];
-}
-
-export async function promoteCredentials(ids) {
-  return await request("/api/credentials/promote", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ids }),
-  });
+  const res = await fetch(u.toString());
+  const payload = await readBody(res);
+  if (!res.ok) throw new Error(toErrorMessage(res, payload));
+  return payload;
 }

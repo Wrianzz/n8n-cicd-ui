@@ -14,14 +14,14 @@ const n8n = axios.create({
 
 n8n.interceptors.request.use((req) => {
   req.headers["accept"] = "application/json";
-  req.headers["X-N8N-API-KEY"] = config.n8n.apiKey;
+  req.headers["X-N8N-API-KEY"] = config.n8n.apiKey; // sesuai docs :contentReference[oaicite:8]{index=8}
   return req;
 });
 
 export async function listAllWorkflows() {
   const apiBase = `/api/${config.n8n.apiVersion}/workflows`;
 
-  const limit = 250;
+  const limit = 250; // max 250 :contentReference[oaicite:9]{index=9}
   let cursor = null;
   const all = [];
 
@@ -40,6 +40,7 @@ export async function listAllWorkflows() {
     if (!cursor) break;
   }
 
+  // Normalisasi agar frontend simpel
   return all.map((w) => ({
     id: w.id,
     name: w.name,
@@ -47,10 +48,4 @@ export async function listAllWorkflows() {
     createdAt: w.createdAt,
     updatedAt: w.updatedAt,
   }));
-}
-
-export async function getWorkflowById(workflowId) {
-  const url = `/api/${config.n8n.apiVersion}/workflows/${encodeURIComponent(workflowId)}`;
-  const res = await n8n.get(url);
-  return res.data;
 }

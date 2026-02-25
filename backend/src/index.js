@@ -3,7 +3,6 @@ import cors from "cors";
 import { config } from "./config.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { jenkinsRouter } from "./routes/jenkins.js";
-import { credentialsRouter } from "./routes/credentials.js";
 
 const app = express();
 
@@ -14,7 +13,6 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.use("/api/workflows", workflowsRouter);
 app.use("/api/jenkins", jenkinsRouter);
-app.use("/api/credentials", credentialsRouter);
 
 // ADD: JSON 404 for /api/*
 app.use("/api", (req, res) => {
@@ -29,4 +27,3 @@ app.use((err, req, res, next) => {
 app.listen(config.port, () => {
   console.log(`[backend] listening on :${config.port}`);
 });
-
