@@ -1,5 +1,5 @@
 import express from "express";
-import { pool } from "../clients/db.js";
+import { pool, prodPool } from "../clients/db.js";
 import { runJobAndWait } from "../clients/jenkins.js";
 import { config } from "../config.js";
 
@@ -28,6 +28,19 @@ credentialsRouter.get("/", async (req, res) => {
     const params = q ? [`%${q}%`] : [];
     const { rows } = await pool.query(sql, params);
 
+    const ids = rows.map((r) => String(r.id));
+    const { rows: prodRows } = ids.length
+      ? await prodPool.query(
+          `
+            SELECT CAST(id AS TEXT) AS id
+            FROM public.credentials_entity
+            WHERE CAST(id AS TEXT) = ANY($1::text[]);
+          `,
+          [ids]
+        )
+      : { rows: [] };
+    const prodIdSet = new Set(prodRows.map((r) => String(r.id)));
+
     res.json({
       data: rows.map((r) => ({
         id: r.id,
@@ -35,6 +48,7 @@ credentialsRouter.get("/", async (req, res) => {
         type: r.type,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
+        inProduction: prodIdSet.has(String(r.id)),
       })),
     });
   } catch (e) {
