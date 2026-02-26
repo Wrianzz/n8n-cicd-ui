@@ -46,27 +46,51 @@ async function getLatestWorkflowHistory(workflowIds) {
   const ids = workflowIds.map(String);
   const { rows } = await backendPool.query(
     `
-      SELECT DISTINCT ON (entity_id)
-        entity_id,
-        action,
-        status,
-        details,
-        build_url,
-        metadata,
-        created_at
-      FROM public.deployment_history
-      WHERE entity_type = 'WORKFLOW'
-        AND entity_id = ANY($1::text[])
-      ORDER BY entity_id, created_at DESC
+      WITH latest_per_action AS (
+        SELECT DISTINCT ON (entity_id, action)
+          entity_id,
+          action,
+          status,
+          details,
+          build_url,
+          metadata,
+          created_at
+        FROM public.deployment_history
+        WHERE entity_type = 'WORKFLOW'
+          AND entity_id = ANY($1::text[])
+        ORDER BY entity_id, action, created_at DESC
+      )
+      SELECT entity_id, action, status, details, build_url, metadata, created_at
+      FROM latest_per_action
     `,
     [ids]
   );
 
+  const statePriority = {
+    AWAITING_APPROVAL: 3,
+    RUNNING: 2,
+    FAILED: 1,
+    SUCCESS: 1,
+  };
+
   const mapped = new Map();
   for (const row of rows) {
+    const entityId = String(row.entity_id);
+    const existing = mapped.get(entityId);
+
+    const existingPriority = statePriority[existing?.state] || 0;
+    const candidatePriority = statePriority[row.status] || 0;
+
+    const shouldReplace =
+      !existing ||
+      candidatePriority > existingPriority ||
+      (candidatePriority === existingPriority && new Date(row.created_at).getTime() > new Date(existing.updatedAt).getTime());
+
+    if (!shouldReplace) continue;
+
     const persistedSteps = Array.isArray(row?.metadata?.steps) ? row.metadata.steps : [];
     const steps = persistedSteps.length > 0 ? persistedSteps : row?.build_url ? [{ label: "Jenkins build", buildUrl: row.build_url }] : [];
-    mapped.set(String(row.entity_id), {
+    mapped.set(entityId, {
       state: row.status,
       label: workflowHistoryLabel(row),
       steps,
