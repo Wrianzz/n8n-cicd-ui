@@ -62,14 +62,24 @@ export async function getHistorySummary({ days = 7, status }) {
   let statusWhere = "";
   if (status && status !== "ALL") {
     params.push(status);
-    statusWhere = ` AND status = $${params.length}`;
+    statusWhere = ` WHERE status = $${params.length}`;
   }
 
   const { rows: healthRows } = await backendPool.query(
     `
+      WITH latest AS (
+        SELECT DISTINCT ON (entity_type, entity_id, action)
+          entity_type,
+          entity_id,
+          action,
+          status,
+          created_at
+        FROM public.deployment_history
+        WHERE created_at >= NOW() - ($1::text || ' days')::interval
+        ORDER BY entity_type, entity_id, action, created_at DESC
+      )
       SELECT status, COUNT(*)::int AS total
-      FROM public.deployment_history
-      WHERE created_at >= NOW() - ($1::text || ' days')::interval
+      FROM latest
       ${statusWhere}
       GROUP BY status
     `,
@@ -78,10 +88,23 @@ export async function getHistorySummary({ days = 7, status }) {
 
   const { rows: approvalRows } = await backendPool.query(
     `
+      WITH latest AS (
+        SELECT DISTINCT ON (entity_type, entity_id, action)
+          id,
+          entity_id,
+          entity_name,
+          action,
+          status,
+          build_url,
+          details,
+          created_at
+        FROM public.deployment_history
+        WHERE created_at >= NOW() - ($1::text || ' days')::interval
+        ORDER BY entity_type, entity_id, action, created_at DESC
+      )
       SELECT id, entity_id, entity_name, action, status, build_url, details, created_at
-      FROM public.deployment_history
-      WHERE created_at >= NOW() - ($1::text || ' days')::interval
-        AND status = 'AWAITING_APPROVAL'
+      FROM latest
+      WHERE status = 'AWAITING_APPROVAL'
       ORDER BY created_at DESC
       LIMIT 20
     `,
@@ -90,8 +113,22 @@ export async function getHistorySummary({ days = 7, status }) {
 
   const { rows: activityRows } = await backendPool.query(
     `
+      WITH latest AS (
+        SELECT DISTINCT ON (entity_type, entity_id, action)
+          id,
+          entity_type,
+          entity_id,
+          entity_name,
+          action,
+          status,
+          build_url,
+          details,
+          created_at
+        FROM public.deployment_history
+        ORDER BY entity_type, entity_id, action, created_at DESC
+      )
       SELECT id, entity_type, entity_id, entity_name, action, status, build_url, details, created_at
-      FROM public.deployment_history
+      FROM latest
       ORDER BY created_at DESC
       LIMIT 20
     `

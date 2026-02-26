@@ -2,10 +2,104 @@ import express from "express";
 import { listAllWorkflows, getWorkflowById } from "../clients/n8n.js";
 import { runJobAndWait } from "../clients/jenkins.js";
 import { config } from "../config.js";
-import { pool, prodPool } from "../clients/db.js";
+import { pool, prodPool, backendPool } from "../clients/db.js";
 import { recordHistory } from "../utils/history.js";
 
 export const workflowsRouter = express.Router();
+
+
+
+function workflowHistoryLabel(row) {
+  if (!row) return "";
+  if (row.details) return row.details;
+
+  const action = row.action;
+  const status = row.status;
+
+  if (action === "PUSH_TO_GIT") {
+    if (status === "SUCCESS") return "Pushed to Git";
+    if (status === "AWAITING_APPROVAL") return "Push to Git awaiting approval";
+    if (status === "FAILED") return "Push to Git failed";
+    return "Pushing to Git...";
+  }
+
+  if (action === "PULL_FROM_GIT") {
+    if (status === "SUCCESS") return "Pulled from Git";
+    if (status === "AWAITING_APPROVAL") return "Pull awaiting approval";
+    if (status === "FAILED") return "Pull from Git failed";
+    return "Pulling from Git...";
+  }
+
+  if (action === "PUSH_TO_PROD") {
+    if (status === "SUCCESS") return "Deployed to prod";
+    if (status === "AWAITING_APPROVAL") return "Deploy awaiting approval";
+    if (status === "FAILED") return "Push to prod failed";
+    return "Promoting to prod...";
+  }
+
+  return status;
+}
+
+async function getLatestWorkflowHistory(workflowIds) {
+  if (!Array.isArray(workflowIds) || workflowIds.length === 0) return new Map();
+
+  const ids = workflowIds.map(String);
+  const { rows } = await backendPool.query(
+    `
+      WITH latest_per_action AS (
+        SELECT DISTINCT ON (entity_id, action)
+          entity_id,
+          action,
+          status,
+          details,
+          build_url,
+          metadata,
+          created_at
+        FROM public.deployment_history
+        WHERE entity_type = 'WORKFLOW'
+          AND entity_id = ANY($1::text[])
+        ORDER BY entity_id, action, created_at DESC
+      )
+      SELECT entity_id, action, status, details, build_url, metadata, created_at
+      FROM latest_per_action
+    `,
+    [ids]
+  );
+
+  const statePriority = {
+    AWAITING_APPROVAL: 3,
+    RUNNING: 2,
+    FAILED: 1,
+    SUCCESS: 1,
+  };
+
+  const mapped = new Map();
+  for (const row of rows) {
+    const entityId = String(row.entity_id);
+    const existing = mapped.get(entityId);
+
+    const existingPriority = statePriority[existing?.state] || 0;
+    const candidatePriority = statePriority[row.status] || 0;
+
+    const shouldReplace =
+      !existing ||
+      candidatePriority > existingPriority ||
+      (candidatePriority === existingPriority && new Date(row.created_at).getTime() > new Date(existing.updatedAt).getTime());
+
+    if (!shouldReplace) continue;
+
+    const persistedSteps = Array.isArray(row?.metadata?.steps) ? row.metadata.steps : [];
+    const steps = persistedSteps.length > 0 ? persistedSteps : row?.build_url ? [{ label: "Jenkins build", buildUrl: row.build_url }] : [];
+    mapped.set(entityId, {
+      state: row.status,
+      label: workflowHistoryLabel(row),
+      steps,
+      updatedAt: row.created_at,
+    });
+  }
+
+  return mapped;
+}
 
 
 function normalizeStepState(step) {
@@ -100,7 +194,14 @@ async function getWorkflowMissingCredentials(workflowId) {
 workflowsRouter.get("/", async (req, res) => {
   try {
     const workflows = await listAllWorkflows();
-    res.json({ data: workflows });
+    const historyByWorkflow = await getLatestWorkflowHistory(workflows.map((w) => w.id));
+
+    const data = workflows.map((workflow) => ({
+      ...workflow,
+      lastState: historyByWorkflow.get(String(workflow.id)) || null,
+    }));
+
+    res.json({ data });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
@@ -121,6 +222,16 @@ workflowsRouter.post("/:id/push-git", async (req, res) => {
 
   try {
     const workflow = await getWorkflowById(workflowId);
+
+    await logWorkflowEvent({
+      workflowId,
+      workflowName: workflow?.name,
+      action: "PUSH_TO_GIT",
+      state: "RUNNING",
+      steps: [],
+      details: "Pushing to Git...",
+    });
+
     const step = await runJobAndWait(config.jenkins.jobDevToGit, params);
     const stepState = normalizeStepState(step);
 
@@ -143,6 +254,14 @@ workflowsRouter.post("/:id/pull-git", async (req, res) => {
 
   try {
     const workflow = await getWorkflowById(workflowId);
+    await logWorkflowEvent({
+      workflowId,
+      workflowName: workflow?.name,
+      action: "PULL_FROM_GIT",
+      state: "RUNNING",
+      steps: [],
+      details: "Pulling from Git...",
+    });
     const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
     const steps = [];
 
@@ -191,6 +310,14 @@ workflowsRouter.post("/:id/push", async (req, res) => {
 
   try {
     const workflow = await getWorkflowById(workflowId);
+    await logWorkflowEvent({
+      workflowId,
+      workflowName: workflow?.name,
+      action: "PUSH_TO_PROD",
+      state: "RUNNING",
+      steps: [],
+      details: "Promoting to prod...",
+    });
     const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
     const steps = [];
 
