@@ -78,15 +78,17 @@ async function getLatestWorkflowHistory(workflowIds) {
     const entityId = String(row.entity_id);
     const existing = mapped.get(entityId);
 
+    const existingAt = existing ? new Date(existing.updatedAt).getTime() : 0;
+    const candidateAt = new Date(row.created_at).getTime();
+
+    const shouldReplaceByTime = !existing || candidateAt > existingAt;
+    const isSameMoment = !!existing && candidateAt === existingAt;
+
     const existingPriority = statePriority[existing?.state] || 0;
     const candidatePriority = statePriority[row.status] || 0;
+    const shouldReplaceByPriority = isSameMoment && candidatePriority > existingPriority;
 
-    const shouldReplace =
-      !existing ||
-      candidatePriority > existingPriority ||
-      (candidatePriority === existingPriority && new Date(row.created_at).getTime() > new Date(existing.updatedAt).getTime());
-
-    if (!shouldReplace) continue;
+    if (!shouldReplaceByTime && !shouldReplaceByPriority) continue;
 
     const persistedSteps = Array.isArray(row?.metadata?.steps) ? row.metadata.steps : [];
     const steps = persistedSteps.length > 0 ? persistedSteps : row?.build_url ? [{ label: "Jenkins build", buildUrl: row.build_url }] : [];
