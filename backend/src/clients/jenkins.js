@@ -73,10 +73,10 @@ function extractApprovalInfo(buildJson) {
     // (B) Bentuk umum plugin pipeline-input-step: actions[].executions[].input
     const executions = Array.isArray(a?.executions) ? a.executions : [];
     if (executions.length > 0) {
-      // pilih yang belum settled kalau ada
-      const exec =
-        executions.find((e) => e?.settled === false) ||
-        executions[0];
+      // Input approval hanya valid kalau masih pending (belum settled).
+      // Saat reject/abort, Jenkins sering masih mengirim executions tapi settled=true.
+      const exec = executions.find((e) => e?.settled !== true);
+      if (!exec) continue;
 
       const inp = exec?.input || {};
       const id = exec?.id || inp?.id || null;
@@ -91,9 +91,12 @@ function extractApprovalInfo(buildJson) {
       };
     }
 
-    // (C) Kalau InputAction ada tapi detailnya tidak ikut ke JSON, minimal tandai awaiting.
+    // (C) Kalau InputAction ada tapi detailnya tidak ikut ke JSON,
+    // tandai awaiting hanya selama build masih berjalan.
     // (detail bisa dicoba via input/api/json di getBuildState)
-    return { message: null, proceedText: null, id: null, url: "input/", cancelText: null };
+    if (buildJson?.building) {
+      return { message: null, proceedText: null, id: null, url: "input/", cancelText: null };
+    }
   }
 
   return null;

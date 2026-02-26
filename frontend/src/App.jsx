@@ -148,12 +148,12 @@ function WorkflowsPage() {
     setBusy((b) => ({ ...b, [id]: { ...(b[id] || {}), [key]: val } }));
   }
 
-  function startPollingIfNeeded(id, buildUrl, labels = {}) {
+  function startPollingIfNeeded(id, buildUrl, labels = {}, history = {}) {
     if (pollersRef.current[id]) return;
 
     const intervalId = setInterval(async () => {
       try {
-        const st = await getJenkinsBuildStatus(buildUrl);
+        const st = await getJenkinsBuildStatus(buildUrl, history);
         if (st.state === "AWAITING_APPROVAL") {
           setDeploy((d) => ({ ...d, [id]: { ...(d[id] || {}), state: "AWAITING_APPROVAL", label: "Awaiting approval" } }));
           return;
@@ -205,7 +205,12 @@ function WorkflowsPage() {
 
       if (result.state === "AWAITING_APPROVAL") {
         setDeploy((d) => ({ ...d, [id]: { state: "AWAITING_APPROVAL", label: "Awaiting approval", steps } }));
-        if (waitingStep?.buildUrl) startPollingIfNeeded(id, waitingStep.buildUrl, { success: "Pulled from Git", failedPrefix: "Pull failed" });
+        if (waitingStep?.buildUrl) startPollingIfNeeded(
+          id,
+          waitingStep.buildUrl,
+          { success: "Pulled from Git", failedPrefix: "Pull failed" },
+          { entityType: "WORKFLOW", entityId: id, action: "PULL_FROM_GIT" }
+        );
         return;
       }
 
@@ -230,7 +235,12 @@ function WorkflowsPage() {
 
       if (result.state === "AWAITING_APPROVAL") {
         setDeploy((d) => ({ ...d, [id]: { state: "AWAITING_APPROVAL", label: "Awaiting approval", steps } }));
-        if (waitingStep?.buildUrl) startPollingIfNeeded(id, waitingStep.buildUrl, { success: "Deployed to prod", failedPrefix: "Deploy failed" });
+        if (waitingStep?.buildUrl) startPollingIfNeeded(
+          id,
+          waitingStep.buildUrl,
+          { success: "Deployed to prod", failedPrefix: "Deploy failed" },
+          { entityType: "WORKFLOW", entityId: id, action: "PUSH_TO_PROD" }
+        );
         return;
       }
 
@@ -451,12 +461,12 @@ function CredentialsPage() {
     return () => clearTimeout(t);
   }, [q]);
 
-  function startPollingIfNeeded(id, buildUrl, labels = {}) {
+  function startPollingIfNeeded(id, buildUrl, labels = {}, history = {}) {
     if (pollersRef.current[id]) return;
 
     const intervalId = setInterval(async () => {
       try {
-        const st = await getJenkinsBuildStatus(buildUrl);
+        const st = await getJenkinsBuildStatus(buildUrl, history);
 
         if (st.state === "AWAITING_APPROVAL") {
           setPromoteState((p) => ({ ...p, [id]: { ...(p[id] || {}), state: "AWAITING_APPROVAL", label: "Awaiting approval" } }));
@@ -495,7 +505,12 @@ function CredentialsPage() {
 
       if (result.state === "AWAITING_APPROVAL") {
         setPromoteState((p) => ({ ...p, [id]: { state: "AWAITING_APPROVAL", label: "Awaiting approval", steps } }));
-        if (step?.buildUrl) startPollingIfNeeded(id, step.buildUrl);
+        if (step?.buildUrl) startPollingIfNeeded(
+          id,
+          step.buildUrl,
+          {},
+          { entityType: "CREDENTIAL", entityId: id, action: "PROMOTE_CREDENTIAL", ids: [id] }
+        );
         return;
       }
 
