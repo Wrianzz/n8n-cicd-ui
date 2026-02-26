@@ -1,11 +1,11 @@
-import { pool } from "../clients/db.js";
+import { backendPool } from "../clients/db.js";
 
 let initialized = false;
 
 async function ensureTable() {
   if (initialized) return;
 
-  await pool.query(`
+  await backendPool.query(`
     CREATE TABLE IF NOT EXISTS public.deployment_history (
       id BIGSERIAL PRIMARY KEY,
       entity_type TEXT NOT NULL CHECK (entity_type IN ('WORKFLOW', 'CREDENTIAL')),
@@ -20,12 +20,12 @@ async function ensureTable() {
     );
   `);
 
-  await pool.query(`
+  await backendPool.query(`
     CREATE INDEX IF NOT EXISTS idx_deployment_history_created_at
       ON public.deployment_history (created_at DESC);
   `);
 
-  await pool.query(`
+  await backendPool.query(`
     CREATE INDEX IF NOT EXISTS idx_deployment_history_status_created
       ON public.deployment_history (status, created_at DESC);
   `);
@@ -36,7 +36,7 @@ async function ensureTable() {
 export async function recordHistory(entry) {
   await ensureTable();
 
-  await pool.query(
+  await backendPool.query(
     `
       INSERT INTO public.deployment_history
       (entity_type, entity_id, entity_name, action, status, build_url, details, metadata)
@@ -65,7 +65,7 @@ export async function getHistorySummary({ days = 7, status }) {
     statusWhere = ` AND status = $${params.length}`;
   }
 
-  const { rows: healthRows } = await pool.query(
+  const { rows: healthRows } = await backendPool.query(
     `
       SELECT status, COUNT(*)::int AS total
       FROM public.deployment_history
@@ -76,7 +76,7 @@ export async function getHistorySummary({ days = 7, status }) {
     params
   );
 
-  const { rows: approvalRows } = await pool.query(
+  const { rows: approvalRows } = await backendPool.query(
     `
       SELECT id, entity_id, entity_name, action, status, build_url, details, created_at
       FROM public.deployment_history
@@ -88,7 +88,7 @@ export async function getHistorySummary({ days = 7, status }) {
     [days]
   );
 
-  const { rows: activityRows } = await pool.query(
+  const { rows: activityRows } = await backendPool.query(
     `
       SELECT id, entity_type, entity_id, entity_name, action, status, build_url, details, created_at
       FROM public.deployment_history
