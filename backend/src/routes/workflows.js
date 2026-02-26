@@ -57,7 +57,7 @@ async function getLatestWorkflowHistory(workflowIds) {
       FROM public.deployment_history
       WHERE entity_type = 'WORKFLOW'
         AND entity_id = ANY($1::text[])
-      ORDER BY entity_id, created_at DESC, id DESC
+      ORDER BY entity_id, created_at DESC
     `,
     [ids]
   );
@@ -230,6 +230,14 @@ workflowsRouter.post("/:id/pull-git", async (req, res) => {
 
   try {
     const workflow = await getWorkflowById(workflowId);
+    await logWorkflowEvent({
+      workflowId,
+      workflowName: workflow?.name,
+      action: "PULL_FROM_GIT",
+      state: "RUNNING",
+      steps: [],
+      details: "Pulling from Git...",
+    });
     const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
     const steps = [];
 
@@ -278,6 +286,14 @@ workflowsRouter.post("/:id/push", async (req, res) => {
 
   try {
     const workflow = await getWorkflowById(workflowId);
+    await logWorkflowEvent({
+      workflowId,
+      workflowName: workflow?.name,
+      action: "PUSH_TO_PROD",
+      state: "RUNNING",
+      steps: [],
+      details: "Promoting to prod...",
+    });
     const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
     const steps = [];
 
