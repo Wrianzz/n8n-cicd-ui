@@ -27,24 +27,75 @@ async function getCrumbIfNeeded() {
   return null;
 }
 
+// Fallback: beberapa Jenkins lebih gampang dibaca dari endpoint input/api/json
+async function fetchApprovalFromInputApi(buildUrl) {
+  try {
+    const data = await getJsonAbsolute(
+      `${buildUrl}input/api/json?tree=inputs[id,message,proceedText,ok,cancel,url]`
+    );
+
+    const inputs = Array.isArray(data?.inputs) ? data.inputs : [];
+    if (!inputs.length) return null;
+
+    const first = inputs[0];
+    return {
+      message: first?.message || null,
+      proceedText: first?.proceedText || first?.ok || null,
+      id: first?.id || null,
+      url: first?.url || (first?.id ? `input/${encodeURIComponent(first.id)}/` : "input/"),
+      cancelText: first?.cancel || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function extractApprovalInfo(buildJson) {
   const actions = Array.isArray(buildJson?.actions) ? buildJson.actions : [];
+
   for (const a of actions) {
     const cls = String(a?._class || "");
-    // umum: org.jenkinsci.plugins.workflow.support.steps.input.InputAction
-    if (cls.includes("InputAction")) {
-      const inputs = Array.isArray(a?.inputs) ? a.inputs : [];
-      if (inputs.length > 0) {
-        const first = inputs[0];
-        return {
-          message: first?.message || null,
-          proceedText: first?.proceedText || null,
-          id: first?.id || null,
-          url: first?.url || null, // kadang relative
-        };
-      }
+    if (!cls.includes("InputAction")) continue;
+
+    // (A) Bentuk lama/varian: actions[].inputs[]
+    const inputs = Array.isArray(a?.inputs) ? a.inputs : [];
+    if (inputs.length > 0) {
+      const first = inputs[0];
+      return {
+        message: first?.message || null,
+        proceedText: first?.proceedText || first?.ok || null,
+        id: first?.id || null,
+        url: first?.url || (first?.id ? `input/${encodeURIComponent(first.id)}/` : "input/"),
+        cancelText: first?.cancel || null,
+      };
     }
+
+    // (B) Bentuk umum plugin pipeline-input-step: actions[].executions[].input
+    const executions = Array.isArray(a?.executions) ? a.executions : [];
+    if (executions.length > 0) {
+      // pilih yang belum settled kalau ada
+      const exec =
+        executions.find((e) => e?.settled === false) ||
+        executions[0];
+
+      const inp = exec?.input || {};
+      const id = exec?.id || inp?.id || null;
+
+      return {
+        message: inp?.message || exec?.message || null,
+        // di InputStep: caption tombol OK adalah "ok" (bukan proceedText)
+        proceedText: inp?.ok || inp?.proceedText || null,
+        id,
+        url: exec?.url || (id ? `input/${encodeURIComponent(id)}/` : "input/"),
+        cancelText: inp?.cancel || null,
+      };
+    }
+
+    // (C) Kalau InputAction ada tapi detailnya tidak ikut ke JSON, minimal tandai awaiting.
+    // (detail bisa dicoba via input/api/json di getBuildState)
+    return { message: null, proceedText: null, id: null, url: "input/", cancelText: null };
   }
+
   return null;
 }
 
@@ -108,11 +159,31 @@ export async function waitForBuildFromQueue(queueUrl) {
  *  - { state: "FINISHED", result: "SUCCESS"|"FAILURE"|... }
  */
 export async function getBuildState(buildUrl) {
-  // gunakan tree supaya payload kecil
-  const url = `${buildUrl}api/json?tree=building,result,actions[_class,inputs[id,message,proceedText,url]]`;
+  // NOTE:
+  // InputAction biasanya expose "executions" -> InputStepExecution -> "input" (message/ok/cancel)
+  // jadi kita include itu di tree agar approval kebaca.
+  const url =
+    `${buildUrl}api/json?tree=` +
+    [
+      "building",
+      "result",
+      "actions[_class,inputs[id,message,proceedText,ok,cancel,url],executions[id,settled,input[id,message,ok,cancel]]]",
+    ].join(",");
+
   const b = await getJsonAbsolute(url);
 
-  const approval = extractApprovalInfo(b);
+  let approval = extractApprovalInfo(b);
+
+  // Kalau ada InputAction tapi detailnya kosong, coba endpoint input/api/json
+  if (approval && approval.message == null && approval.id == null) {
+    const fromInputApi = await fetchApprovalFromInputApi(buildUrl);
+    if (fromInputApi) approval = fromInputApi;
+  } else if (!approval) {
+    // juga coba input/api/json kalau parsing actions gagal (varian Jenkins tertentu)
+    const fromInputApi = await fetchApprovalFromInputApi(buildUrl);
+    if (fromInputApi) approval = fromInputApi;
+  }
+
   if (approval) {
     return { state: "AWAITING_APPROVAL", approval };
   }
