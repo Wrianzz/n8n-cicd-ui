@@ -8,6 +8,19 @@ function toJobPath(jobNameOrPath) {
   return parts.map((p) => `job/${encodeURIComponent(p)}`).join("/");
 }
 
+function withTrailingSlash(url) {
+  return url.endsWith("/") ? url : `${url}/`;
+}
+
+function toAbsoluteUrl(baseUrl, maybeRelativeUrl) {
+  if (!maybeRelativeUrl) return null;
+  try {
+    return new URL(maybeRelativeUrl, baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
 const jenkins = axios.create({
   baseURL: config.jenkins.baseUrl,
   timeout: 30000,
@@ -40,7 +53,9 @@ function extractApprovalInfo(buildJson) {
           message: first?.message || null,
           proceedText: first?.proceedText || null,
           id: first?.id || null,
-          url: first?.url || null, // kadang relative
+          url: first?.url || null,
+          proceedUrl: first?.proceedUrl || null,
+          abortUrl: first?.abortUrl || null,
         };
       }
     }
@@ -54,10 +69,12 @@ function extractApprovalFromPendingActions(pendingActions) {
 
   const first = actions[0];
   return {
-    message: first?.message || null,
-    proceedText: first?.proceedText || null,
+    message: first?.message || first?.input?.message || null,
+    proceedText: first?.proceedText || first?.input?.proceedText || null,
     id: first?.id || first?.input?.id || null,
-    url: first?.url || first?.proceedUrl || null,
+    url: first?.url || null,
+    proceedUrl: first?.proceedUrl || null,
+    abortUrl: first?.abortUrl || null,
   };
 }
 
@@ -71,34 +88,84 @@ function extractApprovalFromClassicInputApi(inputApiJson) {
     proceedText: first?.ok || first?.proceedText || null,
     id: first?.id || null,
     url: first?.url || null,
+    proceedUrl: first?.proceedUrl || null,
+    abortUrl: first?.abortUrl || null,
   };
 }
 
-async function detectPendingApproval(buildUrl) {
+function normalizeApprovalUrls(approval, buildUrl) {
+  if (!approval) return null;
+  const normalizedBuildUrl = withTrailingSlash(buildUrl);
+  return {
+    ...approval,
+    url: toAbsoluteUrl(normalizedBuildUrl, approval.url),
+    proceedUrl: toAbsoluteUrl(config.jenkins.baseUrl, approval.proceedUrl),
+    abortUrl: toAbsoluteUrl(config.jenkins.baseUrl, approval.abortUrl),
+    inputPageUrl: toAbsoluteUrl(normalizedBuildUrl, "input/"),
+  };
+}
+
+function mapWfapiFinalResult(status) {
+  const s = String(status || "").toUpperCase();
+  if (s === "SUCCESS") return "SUCCESS";
+  if (s === "FAILED") return "FAILURE";
+  if (s === "ABORTED") return "ABORTED";
+  if (s === "UNSTABLE") return "UNSTABLE";
+  if (s === "NOT_BUILT") return "NOT_BUILT";
+  return null;
+}
+
+async function detectPendingApproval(buildUrl, wfDescribe = null) {
+  const normalizedBuildUrl = withTrailingSlash(buildUrl);
+
+  if (wfDescribe) {
+    const fromDescribe = extractApprovalFromPendingActions(wfDescribe?.pendingInputActions);
+    if (fromDescribe) return normalizeApprovalUrls(fromDescribe, normalizedBuildUrl);
+
+    const pendingHref = wfDescribe?._links?.pendingInputActions?.href;
+    const pendingUrl = toAbsoluteUrl(normalizedBuildUrl, pendingHref);
+    if (pendingUrl) {
+      try {
+        const pendingActions = await getJsonAbsolute(pendingUrl);
+        const fromPendingLink = extractApprovalFromPendingActions(pendingActions);
+        if (fromPendingLink) return normalizeApprovalUrls(fromPendingLink, normalizedBuildUrl);
+      } catch {
+        // Endpoint pending input dari describe bisa unavailable pada variasi plugin tertentu.
+      }
+    }
+
+    const stages = Array.isArray(wfDescribe?.stages) ? wfDescribe.stages : [];
+    const pausedStage = stages.find((s) => String(s?.status || "").toUpperCase() === "PAUSED_PENDING_INPUT");
+    const statusUpper = String(wfDescribe?.status || "").toUpperCase();
+    const awaitingByStatus = statusUpper === "PAUSED_PENDING_INPUT";
+
+    if (pausedStage || awaitingByStatus) {
+      return normalizeApprovalUrls(
+        {
+          message: pausedStage?.name || wfDescribe?.message || "Awaiting approval",
+          proceedText: null,
+          id: null,
+          url: null,
+          proceedUrl: null,
+          abortUrl: null,
+        },
+        normalizedBuildUrl,
+      );
+    }
+  }
+
   try {
-    const pendingActions = await getJsonAbsolute(`${buildUrl}wfapi/pendingInputActions`);
+    const pendingActions = await getJsonAbsolute(`${normalizedBuildUrl}wfapi/pendingInputActions`);
     const pendingApproval = extractApprovalFromPendingActions(pendingActions);
-    if (pendingApproval) return pendingApproval;
+    if (pendingApproval) return normalizeApprovalUrls(pendingApproval, normalizedBuildUrl);
   } catch {
     // Endpoint wfapi bisa tidak tersedia.
   }
 
   try {
-    const wfDescribe = await getJsonAbsolute(`${buildUrl}wfapi/describe`);
-    const pendingApproval = extractApprovalFromPendingActions(wfDescribe?.pendingInputActions);
-    if (pendingApproval) return pendingApproval;
-
-    if (String(wfDescribe?.status || "").includes("PENDING_INPUT")) {
-      return { message: wfDescribe?.message || "Awaiting approval", proceedText: null, id: null, url: null };
-    }
-  } catch {
-    // Endpoint wfapi/describe bisa tidak tersedia.
-  }
-
-  try {
-    const inputApi = await getJsonAbsolute(`${buildUrl}input/api/json`);
+    const inputApi = await getJsonAbsolute(`${normalizedBuildUrl}input/api/json`);
     const classicApproval = extractApprovalFromClassicInputApi(inputApi);
-    if (classicApproval) return classicApproval;
+    if (classicApproval) return normalizeApprovalUrls(classicApproval, normalizedBuildUrl);
   } catch {
     // Endpoint input/api/json bisa 404 saat tidak ada pending input.
   }
@@ -132,7 +199,7 @@ export async function triggerJob(jobNameOrPath, paramsObj) {
   const location = res.headers?.location;
   if (!location) throw new Error(`No Location header from Jenkins: ${jobNameOrPath}`);
 
-  return { queueUrl: location.endsWith("/") ? location : `${location}/` };
+  return { queueUrl: withTrailingSlash(location) };
 }
 
 export async function waitForBuildFromQueue(queueUrl) {
@@ -149,7 +216,7 @@ export async function waitForBuildFromQueue(queueUrl) {
 
     if (q.executable?.url && q.executable?.number != null) {
       return {
-        buildUrl: q.executable.url.endsWith("/") ? q.executable.url : `${q.executable.url}/`,
+        buildUrl: withTrailingSlash(q.executable.url),
         buildNumber: q.executable.number,
       };
     }
@@ -166,18 +233,39 @@ export async function waitForBuildFromQueue(queueUrl) {
  *  - { state: "FINISHED", result: "SUCCESS"|"FAILURE"|... }
  */
 export async function getBuildState(buildUrl) {
+  const normalizedBuildUrl = withTrailingSlash(buildUrl);
+
+  // 1) Prefer wfapi karena lebih akurat untuk paused input (approval)
+  try {
+    const wfDescribe = await getJsonAbsolute(`${normalizedBuildUrl}wfapi/describe`);
+    const pendingApproval = await detectPendingApproval(normalizedBuildUrl, wfDescribe);
+    if (pendingApproval) {
+      return { state: "AWAITING_APPROVAL", approval: pendingApproval };
+    }
+
+    const wfResult = mapWfapiFinalResult(wfDescribe?.status);
+    if (wfResult) return { state: "FINISHED", result: wfResult };
+
+    if (String(wfDescribe?.status || "").toUpperCase() === "QUEUED") {
+      return { state: "BUILDING" };
+    }
+  } catch {
+    // ignore -> fallback ke core API
+  }
+
+  // 2) Fallback core API
   // gunakan tree supaya payload kecil
-  const url = `${buildUrl}api/json?tree=building,result,actions[_class,inputs[id,message,proceedText,url]]`;
+  const url = `${normalizedBuildUrl}api/json?tree=building,result,actions[_class,inputs[id,message,proceedText,url,proceedUrl,abortUrl]]`;
   const b = await getJsonAbsolute(url);
 
-  const approval = extractApprovalInfo(b);
+  const approval = normalizeApprovalUrls(extractApprovalInfo(b), normalizedBuildUrl);
   if (approval) {
     return { state: "AWAITING_APPROVAL", approval };
   }
 
   // Fallback lintas variasi Jenkins/Pipeline plugin ketika InputAction belum muncul di actions[].
   if (b.building) {
-    const pendingApproval = await detectPendingApproval(buildUrl);
+    const pendingApproval = await detectPendingApproval(normalizedBuildUrl);
     if (pendingApproval) {
       return { state: "AWAITING_APPROVAL", approval: pendingApproval };
     }
