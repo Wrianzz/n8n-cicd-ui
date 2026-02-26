@@ -3,8 +3,31 @@ import { listAllWorkflows, getWorkflowById } from "../clients/n8n.js";
 import { runJobAndWait } from "../clients/jenkins.js";
 import { config } from "../config.js";
 import { pool, prodPool } from "../clients/db.js";
+import { recordHistory } from "../utils/history.js";
 
 export const workflowsRouter = express.Router();
+
+
+function normalizeStepState(step) {
+  if (step?.state === "AWAITING_APPROVAL") return "AWAITING_APPROVAL";
+  if (step?.state === "FINISHED" && step?.result === "SUCCESS") return "SUCCESS";
+  if (step?.state === "FINISHED") return "FAILED";
+  return "RUNNING";
+}
+
+async function logWorkflowEvent({ workflowId, workflowName, action, state, steps = [], details }) {
+  const mainStep = Array.isArray(steps) ? steps[steps.length - 1] || steps[0] : null;
+  await recordHistory({
+    entityType: "WORKFLOW",
+    entityId: workflowId,
+    entityName: workflowName,
+    action,
+    status: state,
+    buildUrl: mainStep?.buildUrl,
+    details,
+    metadata: { steps },
+  });
+}
 
 function extractCredentialIdsFromWorkflow(workflow) {
   const ids = new Set();
@@ -97,10 +120,16 @@ workflowsRouter.post("/:id/push-git", async (req, res) => {
   const params = { [config.jenkins.workflowParam]: workflowId };
 
   try {
+    const workflow = await getWorkflowById(workflowId);
     const step = await runJobAndWait(config.jenkins.jobDevToGit, params);
-    if (step.state !== "FINISHED" || step.result !== "SUCCESS") {
+    const stepState = normalizeStepState(step);
+
+    if (stepState !== "SUCCESS") {
+      await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_GIT", state: stepState, steps: [step], details: "DEV_TO_GIT failed" });
       return res.status(500).json({ error: "DEV_TO_GIT failed", steps: [step] });
     }
+
+    await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_GIT", state: "SUCCESS", steps: [step], details: "Workflow pushed to Git" });
     res.json({ workflowId, state: "SUCCESS", steps: [step] });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
@@ -113,6 +142,7 @@ workflowsRouter.post("/:id/pull-git", async (req, res) => {
   const params = { [config.jenkins.workflowParam]: workflowId };
 
   try {
+    const workflow = await getWorkflowById(workflowId);
     const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
     const steps = [];
 
@@ -125,10 +155,12 @@ workflowsRouter.post("/:id/pull-git", async (req, res) => {
       steps.push({ ...promoteStep, label: "PROMOTE_CREDS", credentials: missingCredentials });
 
       if (promoteStep.state === "AWAITING_APPROVAL") {
+        await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PULL_FROM_GIT", state: "AWAITING_APPROVAL", steps, details: "Credential promotion awaiting approval" });
         return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
       }
 
       if (promoteStep.state !== "FINISHED" || promoteStep.result !== "SUCCESS") {
+        await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PULL_FROM_GIT", state: "FAILED", steps, details: "PROMOTE_CREDS failed" });
         return res.status(500).json({ error: "PROMOTE_CREDS failed", missingCredentials, steps });
       }
     }
@@ -137,13 +169,16 @@ workflowsRouter.post("/:id/pull-git", async (req, res) => {
     steps.push({ ...step, label: "DEPLOY_FROM_GIT" });
 
     if (step.state === "AWAITING_APPROVAL") {
+      await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PULL_FROM_GIT", state: "AWAITING_APPROVAL", steps, details: "Deploy awaiting approval" });
       return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
     }
 
     if (step.state !== "FINISHED" || step.result !== "SUCCESS") {
+      await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PULL_FROM_GIT", state: "FAILED", steps, details: "DEPLOY_FROM_GIT failed" });
       return res.status(500).json({ error: "DEPLOY_FROM_GIT failed", missingCredentials, steps });
     }
 
+    await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PULL_FROM_GIT", state: "SUCCESS", steps, details: "Workflow deployed from Git" });
     res.json({ workflowId, state: "SUCCESS", missingCredentials, steps });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
@@ -155,6 +190,7 @@ workflowsRouter.post("/:id/push", async (req, res) => {
   const params = { [config.jenkins.workflowParam]: workflowId };
 
   try {
+    const workflow = await getWorkflowById(workflowId);
     const { missingCredentials } = await getWorkflowMissingCredentials(workflowId);
     const steps = [];
 
@@ -167,10 +203,12 @@ workflowsRouter.post("/:id/push", async (req, res) => {
       steps.push({ ...promoteStep, label: "PROMOTE_CREDS", credentials: missingCredentials });
 
       if (promoteStep.state === "AWAITING_APPROVAL") {
+        await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_PROD", state: "AWAITING_APPROVAL", steps, details: "Credential promotion awaiting approval" });
         return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
       }
 
       if (promoteStep.state !== "FINISHED" || promoteStep.result !== "SUCCESS") {
+        await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_PROD", state: "FAILED", steps, details: "PROMOTE_CREDS failed" });
         return res.status(500).json({ error: "PROMOTE_CREDS failed", missingCredentials, steps });
       }
     }
@@ -178,6 +216,7 @@ workflowsRouter.post("/:id/push", async (req, res) => {
     const step1 = await runJobAndWait(config.jenkins.jobDevToGit, params);
     steps.push({ ...step1, label: "DEV_TO_GIT" });
     if (step1.state !== "FINISHED" || step1.result !== "SUCCESS") {
+      await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_PROD", state: "FAILED", steps, details: "DEV_TO_GIT failed" });
       return res.status(500).json({ error: "DEV_TO_GIT failed", missingCredentials, steps });
     }
 
@@ -185,13 +224,16 @@ workflowsRouter.post("/:id/push", async (req, res) => {
     steps.push({ ...step2, label: "DEPLOY_FROM_GIT" });
 
     if (step2.state === "AWAITING_APPROVAL") {
+      await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_PROD", state: "AWAITING_APPROVAL", steps, details: "Deploy awaiting approval" });
       return res.json({ workflowId, state: "AWAITING_APPROVAL", missingCredentials, steps });
     }
 
     if (step2.state !== "FINISHED" || step2.result !== "SUCCESS") {
+      await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_PROD", state: "FAILED", steps, details: "DEPLOY_FROM_GIT failed" });
       return res.status(500).json({ error: "DEPLOY_FROM_GIT failed", missingCredentials, steps });
     }
 
+    await logWorkflowEvent({ workflowId, workflowName: workflow?.name, action: "PUSH_TO_PROD", state: "SUCCESS", steps, details: "Workflow promoted to production" });
     res.json({ workflowId, state: "SUCCESS", missingCredentials, steps });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });

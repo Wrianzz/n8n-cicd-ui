@@ -8,6 +8,7 @@ import {
   getJenkinsBuildStatus,
   fetchCredentials,
   promoteCredentials,
+  fetchDashboardSummary,
 } from "./api";
 
 function formatDate(iso) {
@@ -603,8 +604,138 @@ function CredentialsPage() {
   );
 }
 
+
+function DashboardPage() {
+  const [days, setDays] = useState(7);
+  const [healthFilter, setHealthFilter] = useState("ALL");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [data, setData] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await fetchDashboardSummary({ days, healthStatus: healthFilter });
+      setData(payload);
+    } catch (e) {
+      setError(e.message || "Gagal memuat dashboard");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, [days, healthFilter]);
+
+  const kpi = data?.kpi;
+  const health = data?.deploymentHealth?.counts || {};
+  const approvals = data?.approvals || [];
+  const activities = data?.recentActivity || [];
+  const readiness = data?.credentialReadiness;
+
+  return (
+    <>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold text-slate-900">Dashboard</h1>
+        <button onClick={load} className="px-4 py-2 text-sm font-semibold rounded-xl border border-slate-200 bg-white hover:bg-slate-50">Refresh</button>
+      </div>
+
+      {loading ? <div className="text-sm text-slate-600 mb-4">Loading dashboard...</div> : null}
+      {error ? <div className="text-sm text-red-700 mb-4">{error}</div> : null}
+
+      <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-5">
+        <article className="bg-white border border-slate-200 rounded-2xl p-4">
+          <div className="text-xs text-slate-500">Total Workflows</div>
+          <div className="text-2xl font-bold text-slate-900">{kpi?.totalWorkflows ?? 0}</div>
+          <div className="text-xs text-slate-600 mt-1">Active: {kpi?.activeWorkflows ?? 0}</div>
+        </article>
+        <article className="bg-white border border-slate-200 rounded-2xl p-4">
+          <div className="text-xs text-slate-500">Total Credentials</div>
+          <div className="text-2xl font-bold text-slate-900">{kpi?.totalCredentials ?? 0}</div>
+          <div className="text-xs text-slate-600 mt-1">In production: {kpi?.credentialsInProduction ?? 0}</div>
+        </article>
+        <article className="bg-white border border-slate-200 rounded-2xl p-4">
+          <div className="text-xs text-slate-500">Already in Production</div>
+          <div className="text-2xl font-bold text-green-700">{kpi?.credentialsInProduction ?? 0}</div>
+        </article>
+        <article className="bg-white border border-slate-200 rounded-2xl p-4">
+          <div className="text-xs text-slate-500">Not in Production</div>
+          <div className="text-2xl font-bold text-red-700">{kpi?.credentialsNotInProduction ?? 0}</div>
+        </article>
+      </section>
+
+      <section className="bg-white border border-slate-200 rounded-2xl p-4 mb-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-bold text-slate-900">Deployment Health ({days} hari)</h2>
+          <div className="flex gap-2">
+            <select value={days} onChange={(e) => setDays(Number(e.target.value))} className="text-sm border border-slate-200 rounded-lg px-2 py-1">
+              <option value={7}>7 hari</option>
+              <option value={14}>14 hari</option>
+              <option value={30}>30 hari</option>
+            </select>
+            <select value={healthFilter} onChange={(e) => setHealthFilter(e.target.value)} className="text-sm border border-slate-200 rounded-lg px-2 py-1">
+              <option value="ALL">All status</option>
+              <option value="FAILED">Only failed</option>
+              <option value="AWAITING_APPROVAL">Awaiting approval</option>
+              <option value="SUCCESS">Success</option>
+              <option value="RUNNING">Running</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4 text-center">
+          {Object.entries({ SUCCESS: "text-green-700", FAILED: "text-red-700", AWAITING_APPROVAL: "text-amber-700", RUNNING: "text-blue-700" }).map(([key, color]) => (
+            <div key={key} className="rounded-xl border border-slate-200 p-3">
+              <div className="text-xs text-slate-500">{key}</div>
+              <div className={`text-2xl font-bold ${color}`}>{health[key] || 0}</div>
+            </div>
+          ))}
+        </div>
+
+        <h3 className="text-sm font-bold text-slate-800 mb-2">Approval Queue</h3>
+        <div className="space-y-2">
+          {approvals.length === 0 ? <div className="text-sm text-slate-500">Tidak ada approval pending.</div> : approvals.map((a) => (
+            <div key={a.id} className="border border-slate-200 rounded-xl p-3 text-sm">
+              <div className="font-semibold text-slate-900">{a.entity_name || a.entity_id}</div>
+              <div className="text-xs text-slate-600">{a.action} • {formatDate(a.created_at)}</div>
+              {a.build_url ? <a href={a.build_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline text-xs">Open Jenkins Build</a> : null}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <article className="bg-white border border-slate-200 rounded-2xl p-4">
+          <h2 className="text-lg font-bold text-slate-900">Credential Readiness</h2>
+          <div className="mt-3">
+            <div className="text-3xl font-extrabold text-emerald-700">{readiness?.percentage ?? 0}%</div>
+            <div className="text-xs text-slate-600">{readiness?.inProduction ?? 0} / {readiness?.total ?? 0} credentials dev sudah ada di production</div>
+            <div className="mt-3 h-3 rounded-full bg-slate-200 overflow-hidden">
+              <div className="h-full bg-emerald-500" style={{ width: `${readiness?.percentage ?? 0}%` }} />
+            </div>
+          </div>
+        </article>
+
+        <article className="bg-white border border-slate-200 rounded-2xl p-4">
+          <h2 className="text-lg font-bold text-slate-900 mb-2">Recent Activity Feed</h2>
+          <div className="space-y-2 max-h-72 overflow-auto pr-1">
+            {activities.length === 0 ? <div className="text-sm text-slate-500">Belum ada activity.</div> : activities.map((act) => (
+              <div key={act.id} className="text-sm border border-slate-200 rounded-xl p-2">
+                <div className="font-semibold text-slate-900">{act.entity_name || act.entity_id || act.entity_type}</div>
+                <div className="text-xs text-slate-600">{act.details || act.action} • <span className={statusColor(act.status)}>{act.status}</span></div>
+              </div>
+            ))}
+          </div>
+        </article>
+      </section>
+    </>
+  );
+}
+
 export default function App() {
-  const [page, setPage] = useState("workflows");
+  const [page, setPage] = useState("dashboard");
 
   return (
     <div className="min-h-screen bg-slate-50 flex">
@@ -615,6 +746,17 @@ export default function App() {
         </div>
 
         <nav className="px-3 flex flex-col gap-2">
+
+          <button
+            onClick={() => setPage("dashboard")}
+            className={`px-3 py-2 rounded-xl flex items-center gap-3 text-left ${
+              page === "dashboard" ? "bg-orange-500/15 border border-orange-500/30" : "hover:bg-white/5 border border-transparent"
+            }`}
+          >
+            <span className="text-sm">📊</span>
+            <span className="text-sm font-semibold">Dashboard</span>
+          </button>
+
           <button
             onClick={() => setPage("workflows")}
             className={`px-3 py-2 rounded-xl flex items-center gap-3 text-left ${
@@ -647,7 +789,7 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex-1 p-6 overflow-x-auto">{page === "workflows" ? <WorkflowsPage /> : <CredentialsPage />}</main>
+      <main className="flex-1 p-6 overflow-x-auto">{page === "dashboard" ? <DashboardPage /> : page === "workflows" ? <WorkflowsPage /> : <CredentialsPage />}</main>
     </div>
   );
 }
