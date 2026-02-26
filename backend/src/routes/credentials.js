@@ -134,9 +134,18 @@ credentialsRouter.post("/promote", async (req, res) => {
 
     const params = { [config.jenkins.credIdsParam]: ids.join(",") };
 
-    const step = await runJobAndWait(config.jenkins.jobPromoteCreds, params, { stopOnApproval: true });
-
     const detail = `Promote credentials (${ids.join(",")})`;
+
+    await recordHistory({
+      entityType: "CREDENTIAL",
+      entityId: ids.join(","),
+      action: "PROMOTE_CREDENTIAL",
+      status: "RUNNING",
+      details: "Promoting...",
+      metadata: { ids, steps: [] },
+    });
+
+    const step = await runJobAndWait(config.jenkins.jobPromoteCreds, params, { stopOnApproval: true });
 
     if (step.state === "AWAITING_APPROVAL") {
       await recordHistory({
