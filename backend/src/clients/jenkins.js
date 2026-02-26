@@ -48,6 +48,64 @@ function extractApprovalInfo(buildJson) {
   return null;
 }
 
+function extractApprovalFromPendingActions(pendingActions) {
+  const actions = Array.isArray(pendingActions) ? pendingActions : [];
+  if (actions.length === 0) return null;
+
+  const first = actions[0];
+  return {
+    message: first?.message || null,
+    proceedText: first?.proceedText || null,
+    id: first?.id || first?.input?.id || null,
+    url: first?.url || first?.proceedUrl || null,
+  };
+}
+
+function extractApprovalFromClassicInputApi(inputApiJson) {
+  const inputs = Array.isArray(inputApiJson?.inputs) ? inputApiJson.inputs : [];
+  if (inputs.length === 0) return null;
+
+  const first = inputs[0];
+  return {
+    message: first?.message || first?.caption || null,
+    proceedText: first?.ok || first?.proceedText || null,
+    id: first?.id || null,
+    url: first?.url || null,
+  };
+}
+
+async function detectPendingApproval(buildUrl) {
+  try {
+    const pendingActions = await getJsonAbsolute(`${buildUrl}wfapi/pendingInputActions`);
+    const pendingApproval = extractApprovalFromPendingActions(pendingActions);
+    if (pendingApproval) return pendingApproval;
+  } catch {
+    // Endpoint wfapi bisa tidak tersedia.
+  }
+
+  try {
+    const wfDescribe = await getJsonAbsolute(`${buildUrl}wfapi/describe`);
+    const pendingApproval = extractApprovalFromPendingActions(wfDescribe?.pendingInputActions);
+    if (pendingApproval) return pendingApproval;
+
+    if (String(wfDescribe?.status || "").includes("PENDING_INPUT")) {
+      return { message: wfDescribe?.message || "Awaiting approval", proceedText: null, id: null, url: null };
+    }
+  } catch {
+    // Endpoint wfapi/describe bisa tidak tersedia.
+  }
+
+  try {
+    const inputApi = await getJsonAbsolute(`${buildUrl}input/api/json`);
+    const classicApproval = extractApprovalFromClassicInputApi(inputApi);
+    if (classicApproval) return classicApproval;
+  } catch {
+    // Endpoint input/api/json bisa 404 saat tidak ada pending input.
+  }
+
+  return null;
+}
+
 async function getJsonAbsolute(url) {
   const res = await axios.get(url, {
     auth: { username: config.jenkins.user, password: config.jenkins.token },
@@ -115,6 +173,14 @@ export async function getBuildState(buildUrl) {
   const approval = extractApprovalInfo(b);
   if (approval) {
     return { state: "AWAITING_APPROVAL", approval };
+  }
+
+  // Fallback lintas variasi Jenkins/Pipeline plugin ketika InputAction belum muncul di actions[].
+  if (b.building) {
+    const pendingApproval = await detectPendingApproval(buildUrl);
+    if (pendingApproval) {
+      return { state: "AWAITING_APPROVAL", approval: pendingApproval };
+    }
   }
 
   if (b.building) return { state: "BUILDING" };
