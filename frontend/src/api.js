@@ -49,9 +49,16 @@ export async function pullWorkflowFromGit(workflowId) {
   return await request(`/api/workflows/${encodeURIComponent(workflowId)}/pull-git`, { method: "POST" });
 }
 
-export async function getJenkinsBuildStatus(buildUrl) {
+export async function getJenkinsBuildStatus(buildUrl, options = {}) {
   const u = new URL("/api/jenkins/build-status", window.location.origin);
   u.searchParams.set("buildUrl", buildUrl);
+
+  if (options.entityType) u.searchParams.set("entityType", options.entityType);
+  if (options.entityId) u.searchParams.set("entityId", String(options.entityId));
+  if (options.action) u.searchParams.set("action", options.action);
+  if (options.entityName) u.searchParams.set("entityName", options.entityName);
+  if (Array.isArray(options.ids) && options.ids.length > 0) u.searchParams.set("ids", options.ids.map(String).join(","));
+
   return await request(u.toString());
 }
 
