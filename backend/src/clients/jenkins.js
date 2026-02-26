@@ -1,6 +1,6 @@
+// backend/src/clients/jenkins.ts
 import axios from "axios";
 import { config } from "../config.js";
-import { sleep } from "../utils/sleep.js";
 
 // "folder/sub/jobName" -> "job/folder/job/sub/job/jobName"
 function toJobPath(jobNameOrPath) {
@@ -167,32 +167,18 @@ async function detectPendingApproval(buildUrl, wfDescribe = null) {
     const classicApproval = extractApprovalFromClassicInputApi(inputApi);
     if (classicApproval) return normalizeApprovalUrls(classicApproval, normalizedBuildUrl);
   } catch {
-    // Endpoint input/api/json bisa 404 saat tidak ada pending input.
+    // ignore → fallback
   }
 
-  return null;
-}
+  // 2) Fallback: core API (tidak bisa bedain paused input vs running)
+  const apiUrl = new URL("api/json?tree=building,result", normalized).toString();
+  const { data } = await http.get(apiUrl);
 
-async function getJsonAbsolute(url) {
-  const res = await axios.get(url, {
-    auth: { username: config.jenkins.user, password: config.jenkins.token },
-    timeout: 30000,
-    headers: { accept: "application/json" },
-  });
-  return res.data;
-}
+  const building = Boolean(data?.building);
+  const result = data?.result ? String(data.result) : null;
 
-export async function triggerJob(jobNameOrPath, paramsObj) {
-  const jobPath = toJobPath(jobNameOrPath);
-  const endpoint = `/${jobPath}/buildWithParameters`;
-
-  const crumb = await getCrumbIfNeeded();
-
-  const form = new URLSearchParams();
-  for (const [k, v] of Object.entries(paramsObj)) form.set(k, String(v));
-
-  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
-  if (crumb) headers[crumb.field] = crumb.crumb;
+  if (building) return { phase: "IN_PROGRESS", rawStatus: "IN_PROGRESS" };
+  if (result) return { phase: mapCoreResult(result), rawStatus: result };
 
   const res = await jenkins.post(endpoint, form.toString(), { headers });
 
@@ -270,45 +256,9 @@ export async function getBuildState(buildUrl) {
       return { state: "AWAITING_APPROVAL", approval: pendingApproval };
     }
   }
-
-  if (b.building) return { state: "BUILDING" };
-
-  return { state: "FINISHED", result: b.result || "UNKNOWN" };
 }
 
-/**
- * Tunggu sampai FINISHED atau (opsional) berhenti saat approval.
- */
-export async function waitForBuildFinalOrApproval(buildUrl, { stopOnApproval } = { stopOnApproval: false }) {
-  const startedAt = Date.now();
-
-  while (true) {
-    if (Date.now() - startedAt > config.jenkins.jobTimeoutMs) {
-      throw new Error(`Timeout waiting build state: ${buildUrl}`);
-    }
-
-    const state = await getBuildState(buildUrl);
-
-    if (state.state === "AWAITING_APPROVAL" && stopOnApproval) return state;
-    if (state.state === "FINISHED") return state;
-
-    await sleep(config.jenkins.pollIntervalMs);
-  }
-}
-
-export async function runJobAndWait(jobNameOrPath, paramsObj, opts = {}) {
-  const { stopOnApproval = false } = opts;
-
-  const { queueUrl } = await triggerJob(jobNameOrPath, paramsObj);
-  const { buildUrl, buildNumber } = await waitForBuildFromQueue(queueUrl);
-
-  const finalState = await waitForBuildFinalOrApproval(buildUrl, { stopOnApproval });
-
-  return {
-    job: jobNameOrPath,
-    queueUrl,
-    buildUrl,
-    buildNumber,
-    ...finalState, // state/result/approval
-  };
+function currentStageName(stages: any[]): string | undefined {
+  const inProgress = stages.find((s) => s?.status === "IN_PROGRESS");
+  return inProgress?.name;
 }
