@@ -105,15 +105,21 @@ credentialsRouter.get("/", async (req, res) => {
     const historyByCredential = await getLatestCredentialHistory(ids);
 
     res.json({
-      data: rows.map((r) => ({
-        id: r.id,
-        name: r.name,
-        type: r.type,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-        inProduction: prodIdSet.has(String(r.id)),
-        lastState: historyByCredential.get(String(r.id)) || null,
-      })),
+      data: rows.map((r) => {
+        const inProduction = prodIdSet.has(String(r.id));
+        const lastState = historyByCredential.get(String(r.id)) || null;
+        const sanitizedLastState = !inProduction && lastState?.state === "SUCCESS" ? null : lastState;
+
+        return {
+          id: r.id,
+          name: r.name,
+          type: r.type,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+          inProduction,
+          lastState: sanitizedLastState,
+        };
+      }),
     });
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
