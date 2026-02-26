@@ -37,14 +37,102 @@ function extractApprovalInfo(buildJson) {
       if (inputs.length > 0) {
         const first = inputs[0];
         return {
-          message: first?.message || null,
-          proceedText: first?.proceedText || null,
-          id: first?.id || null,
-          url: first?.url || null, // kadang relative
+          message: first?.message || a?.message || null,
+          proceedText: first?.proceedText || first?.ok || a?.proceedText || a?.ok || null,
+          id: first?.id || a?.id || null,
+          url: first?.url || a?.url || null, // kadang relative
         };
       }
+
+      // Beberapa Jenkins hanya expose kelas InputAction tanpa detail inputs.
+      return {
+        message: a?.message || "Awaiting approval",
+        proceedText: a?.proceedText || a?.ok || null,
+        id: a?.id || null,
+        url: a?.url || null,
+      };
     }
   }
+  return null;
+}
+
+function extractApprovalFromWfapiPendingActions(pendingActions) {
+  const actions = Array.isArray(pendingActions) ? pendingActions : [];
+  if (actions.length === 0) return null;
+
+  const first = actions[0];
+  return {
+    message: first?.message || null,
+    proceedText: first?.proceedText || null,
+    id: first?.id || first?.input?.id || null,
+    url: first?.url || first?.proceedUrl || null,
+  };
+}
+
+function extractApprovalFromClassicInputApi(inputApiJson) {
+  const inputs = Array.isArray(inputApiJson?.inputs) ? inputApiJson.inputs : [];
+  if (inputs.length === 0) return null;
+
+  const first = inputs[0];
+  return {
+    message: first?.message || first?.caption || null,
+    proceedText: first?.ok || first?.proceedText || null,
+    id: first?.id || null,
+    url: first?.url || null,
+  };
+}
+
+async function detectPendingApprovalFromConsole(buildUrl) {
+  try {
+    const text = await getTextAbsolute(`${buildUrl}consoleText`);
+    const tail = text.slice(-4000);
+
+    // Pola umum Jenkins saat menunggu input manual.
+    const hasInputPause = /\[Pipeline\] input/i.test(tail) || /\bInput requested\b/i.test(tail);
+    const hasProceedAbortPrompt = /\bor\s+Abort\b/i.test(tail);
+
+    if (hasInputPause && hasProceedAbortPrompt) {
+      return { message: "Awaiting approval", proceedText: null, id: null, url: null };
+    }
+  } catch {
+    // consoleText bisa dibatasi/habis timeout.
+  }
+
+  return null;
+}
+
+async function detectPendingApproval(buildUrl) {
+  try {
+    const pendingActions = await getJsonAbsolute(`${buildUrl}wfapi/pendingInputActions`);
+    const pendingApproval = extractApprovalFromWfapiPendingActions(pendingActions);
+    if (pendingApproval) return pendingApproval;
+  } catch {
+    // Endpoint wfapi bisa tidak tersedia.
+  }
+
+  try {
+    const wfDescribe = await getJsonAbsolute(`${buildUrl}wfapi/describe`);
+    const pendingApproval = extractApprovalFromWfapiPendingActions(wfDescribe?.pendingInputActions);
+    if (pendingApproval) return pendingApproval;
+
+    if (String(wfDescribe?.status || "").includes("PENDING_INPUT")) {
+      return { message: wfDescribe?.message || "Awaiting approval", proceedText: null, id: null, url: null };
+    }
+  } catch {
+    // Endpoint wfapi/describe bisa tidak tersedia.
+  }
+
+  try {
+    const inputApi = await getJsonAbsolute(`${buildUrl}input/api/json`);
+    const classicApproval = extractApprovalFromClassicInputApi(inputApi);
+    if (classicApproval) return classicApproval;
+  } catch {
+    // Endpoint input/api/json bisa 404 saat tidak ada pending input.
+  }
+
+  const consoleApproval = await detectPendingApprovalFromConsole(buildUrl);
+  if (consoleApproval) return consoleApproval;
+
   return null;
 }
 
@@ -115,6 +203,16 @@ async function getJsonAbsolute(url) {
   return res.data;
 }
 
+async function getTextAbsolute(url) {
+  const res = await axios.get(url, {
+    auth: { username: config.jenkins.user, password: config.jenkins.token },
+    timeout: 30000,
+    responseType: "text",
+    headers: { accept: "text/plain" },
+  });
+  return String(res.data || "");
+}
+
 export async function triggerJob(jobNameOrPath, paramsObj) {
   const jobPath = toJobPath(jobNameOrPath);
   const endpoint = `/${jobPath}/buildWithParameters`;
@@ -167,7 +265,7 @@ export async function waitForBuildFromQueue(queueUrl) {
  */
 export async function getBuildState(buildUrl) {
   // gunakan tree supaya payload kecil
-  const url = `${buildUrl}api/json?tree=building,result,actions[_class,inputs[id,message,proceedText,url]]`;
+  const url = `${buildUrl}api/json?tree=building,result,actions[_class,id,message,proceedText,url,ok,inputs[id,message,proceedText,url,ok]]`;
   const b = await getJsonAbsolute(url);
 
   const approval = extractApprovalInfo(b);
