@@ -48,6 +48,19 @@ function extractApprovalInfo(buildJson) {
   return null;
 }
 
+function extractApprovalFromPendingActions(pendingActions) {
+  const actions = Array.isArray(pendingActions) ? pendingActions : [];
+  if (actions.length === 0) return null;
+
+  const first = actions[0];
+  return {
+    message: first?.message || null,
+    proceedText: first?.proceedText || null,
+    id: first?.id || first?.input?.id || null,
+    url: first?.url || first?.proceedUrl || null,
+  };
+}
+
 async function getJsonAbsolute(url) {
   const res = await axios.get(url, {
     auth: { username: config.jenkins.user, password: config.jenkins.token },
@@ -115,6 +128,20 @@ export async function getBuildState(buildUrl) {
   const approval = extractApprovalInfo(b);
   if (approval) {
     return { state: "AWAITING_APPROVAL", approval };
+  }
+
+  // Fallback untuk beberapa Jenkins Pipeline: approval muncul di wfapi/pendingInputActions
+  // meskipun InputAction belum terisi di actions[] build API.
+  if (b.building) {
+    try {
+      const pendingActions = await getJsonAbsolute(`${buildUrl}wfapi/pendingInputActions`);
+      const pendingApproval = extractApprovalFromPendingActions(pendingActions);
+      if (pendingApproval) {
+        return { state: "AWAITING_APPROVAL", approval: pendingApproval };
+      }
+    } catch {
+      // Endpoint wfapi bisa tidak tersedia; lanjutkan deteksi normal.
+    }
   }
 
   if (b.building) return { state: "BUILDING" };
