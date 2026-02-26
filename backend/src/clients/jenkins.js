@@ -193,6 +193,9 @@ export async function getBuildState(buildUrl) {
  */
 export async function waitForBuildFinalOrApproval(buildUrl, { stopOnApproval } = { stopOnApproval: false }) {
   const startedAt = Date.now();
+  
+  // 1. Cek apakah stopOnApproval beneran true dari pemanggilnya
+  console.log(`[DEBUG JENKINS] Mulai pantau: ${buildUrl} | stopOnApproval: ${stopOnApproval}`); 
 
   while (true) {
     if (Date.now() - startedAt > config.jenkins.jobTimeoutMs) {
@@ -200,9 +203,19 @@ export async function waitForBuildFinalOrApproval(buildUrl, { stopOnApproval } =
     }
 
     const state = await getBuildState(buildUrl);
+    
+    // 2. Cek state apa yang didapat dari Jenkins di tiap loop
+    console.log(`[DEBUG JENKINS] State saat ini: ${state.state}`);
 
-    if (state.state === "AWAITING_APPROVAL" && stopOnApproval) return state;
-    if (state.state === "FINISHED") return state;
+    if (state.state === "AWAITING_APPROVAL" && stopOnApproval) {
+      console.log("[DEBUG JENKINS] Approval terdeteksi! Keluar dari loop.");
+      return state;
+    }
+    
+    if (state.state === "FINISHED") {
+      console.log("[DEBUG JENKINS] Build selesai. Keluar dari loop.");
+      return state;
+    }
 
     await sleep(config.jenkins.pollIntervalMs);
   }
