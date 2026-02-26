@@ -1,10 +1,70 @@
 import express from "express";
-import { pool, prodPool } from "../clients/db.js";
+import { pool, prodPool, backendPool } from "../clients/db.js";
 import { runJobAndWait } from "../clients/jenkins.js";
 import { config } from "../config.js";
 import { recordHistory } from "../utils/history.js";
 
 export const credentialsRouter = express.Router();
+
+
+
+function credentialHistoryLabel(row) {
+  if (!row) return "";
+  if (row.details) return row.details;
+  if (row.status === "SUCCESS") return "Promoted to prod";
+  if (row.status === "AWAITING_APPROVAL") return "Awaiting approval";
+  if (row.status === "FAILED") return "Promote failed";
+  return "Promoting...";
+}
+
+async function getLatestCredentialHistory(credentialIds) {
+  if (!Array.isArray(credentialIds) || credentialIds.length === 0) return new Map();
+
+  const ids = credentialIds.map(String);
+  const { rows } = await backendPool.query(
+    `
+      WITH expanded AS (
+        SELECT
+          h.id,
+          h.action,
+          h.status,
+          h.details,
+          h.build_url,
+          h.metadata,
+          h.created_at,
+          jsonb_array_elements_text(COALESCE(h.metadata->'ids', '[]'::jsonb)) AS cred_id
+        FROM public.deployment_history h
+        WHERE h.entity_type = 'CREDENTIAL'
+      )
+      SELECT DISTINCT ON (cred_id)
+        cred_id,
+        action,
+        status,
+        details,
+        build_url,
+        metadata,
+        created_at
+      FROM expanded
+      WHERE cred_id = ANY($1::text[])
+      ORDER BY cred_id, created_at DESC
+    `,
+    [ids]
+  );
+
+  const mapped = new Map();
+  for (const row of rows) {
+    const persistedSteps = Array.isArray(row?.metadata?.steps) ? row.metadata.steps : [];
+    const steps = persistedSteps.length > 0 ? persistedSteps : row?.build_url ? [{ label: "Promote build", buildUrl: row.build_url }] : [];
+    mapped.set(String(row.cred_id), {
+      state: row.status,
+      label: credentialHistoryLabel(row),
+      steps,
+      updatedAt: row.created_at,
+    });
+  }
+
+  return mapped;
+}
 
 // List credential metadata (no secrets)
 credentialsRouter.get("/", async (req, res) => {
@@ -42,6 +102,8 @@ credentialsRouter.get("/", async (req, res) => {
       : { rows: [] };
     const prodIdSet = new Set(prodRows.map((r) => String(r.id)));
 
+    const historyByCredential = await getLatestCredentialHistory(ids);
+
     res.json({
       data: rows.map((r) => ({
         id: r.id,
@@ -50,6 +112,7 @@ credentialsRouter.get("/", async (req, res) => {
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
         inProduction: prodIdSet.has(String(r.id)),
+        lastState: historyByCredential.get(String(r.id)) || null,
       })),
     });
   } catch (e) {
@@ -71,9 +134,18 @@ credentialsRouter.post("/promote", async (req, res) => {
 
     const params = { [config.jenkins.credIdsParam]: ids.join(",") };
 
-    const step = await runJobAndWait(config.jenkins.jobPromoteCreds, params, { stopOnApproval: true });
-
     const detail = `Promote credentials (${ids.join(",")})`;
+
+    await recordHistory({
+      entityType: "CREDENTIAL",
+      entityId: ids.join(","),
+      action: "PROMOTE_CREDENTIAL",
+      status: "RUNNING",
+      details: "Promoting...",
+      metadata: { ids, steps: [] },
+    });
+
+    const step = await runJobAndWait(config.jenkins.jobPromoteCreds, params, { stopOnApproval: true });
 
     if (step.state === "AWAITING_APPROVAL") {
       await recordHistory({
