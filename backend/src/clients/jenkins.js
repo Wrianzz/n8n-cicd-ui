@@ -2,91 +2,170 @@
 import axios from "axios";
 import { config } from "../config.js";
 
-export type UiBuildPhase =
-  | "QUEUED"
-  | "IN_PROGRESS"
-  | "AWAITING_APPROVAL"
-  | "SUCCESS"
-  | "FAILED"
-  | "ABORTED"
-  | "UNSTABLE"
-  | "NOT_BUILT"
-  | "UNKNOWN";
+// "folder/sub/jobName" -> "job/folder/job/sub/job/jobName"
+function toJobPath(jobNameOrPath) {
+  const parts = jobNameOrPath.split("/").filter(Boolean);
+  return parts.map((p) => `job/${encodeURIComponent(p)}`).join("/");
+}
 
-export type BuildState = {
-  phase: UiBuildPhase;
-  rawStatus?: string;
-  stage?: string;
+function withTrailingSlash(url) {
+  return url.endsWith("/") ? url : `${url}/`;
+}
 
-  // khusus approval (optional)
-  message?: string;
-  inputPageUrl?: string; // halaman UI Jenkins untuk approve
-  proceedUrl?: string;   // endpoint proceed (biasanya butuh POST)
-  abortUrl?: string;     // endpoint abort (biasanya butuh POST)
-};
+function toAbsoluteUrl(baseUrl, maybeRelativeUrl) {
+  if (!maybeRelativeUrl) return null;
+  try {
+    return new URL(maybeRelativeUrl, baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
 
-const http = axios.create({
-  // kalau kamu sudah pakai auth di tempat lain, sesuaikan
-  auth: config.jenkins.user && config.jenkins.apiToken
-    ? { username: config.jenkins.user, password: config.jenkins.apiToken }
-    : undefined,
-  headers: { Accept: "application/json" },
-  timeout: 10_000,
+const jenkins = axios.create({
+  baseURL: config.jenkins.baseUrl,
+  timeout: 30000,
+  auth: { username: config.jenkins.user, password: config.jenkins.token },
+  maxRedirects: 0,
+  validateStatus: (s) => s >= 200 && s < 400,
 });
 
-export async function getBuildState(buildUrl: string): Promise<BuildState> {
-  const normalized = buildUrl.endsWith("/") ? buildUrl : `${buildUrl}/`;
-
-  // 1) Prefer: wfapi (Pipeline: REST API plugin)
+async function getCrumbIfNeeded() {
+  // Dengan API token biasanya exempt, tapi ambil crumb tetap aman.
   try {
-    const describeUrl = new URL("wfapi/describe", normalized).toString();
-    const { data } = await http.get(describeUrl);
+    const res = await jenkins.get("/crumbIssuer/api/json");
+    const field = res.data?.crumbRequestField;
+    const crumb = res.data?.crumb;
+    if (field && crumb) return { field, crumb };
+  } catch {}
+  return null;
+}
 
-    const raw = String(data?.status ?? "UNKNOWN");
-
-    const stages = Array.isArray(data?.stages) ? data.stages : [];
-    const pausedStage = stages.find((s: any) => s?.status === "PAUSED_PENDING_INPUT");
-    const hasPendingLink = Boolean(data?._links?.pendingInputActions?.href);
-
-    const isAwaiting =
-      raw === "PAUSED_PENDING_INPUT" || hasPendingLink || Boolean(pausedStage);
-
-    if (isAwaiting) {
-      // Optional: ambil message + proceed/abort dari pendingInputActions
-      let pending: any[] | undefined;
-      try {
-        const pendingUrl = new URL("wfapi/pendingInputActions", normalized).toString();
-        const r = await http.get(pendingUrl);
-        pending = Array.isArray(r.data) ? r.data : undefined;
-      } catch {
-        // tetap return awaiting approval walau pending actions gagal di-fetch
+function extractApprovalInfo(buildJson) {
+  const actions = Array.isArray(buildJson?.actions) ? buildJson.actions : [];
+  for (const a of actions) {
+    const cls = String(a?._class || "");
+    // umum: org.jenkinsci.plugins.workflow.support.steps.input.InputAction
+    if (cls.includes("InputAction")) {
+      const inputs = Array.isArray(a?.inputs) ? a.inputs : [];
+      if (inputs.length > 0) {
+        const first = inputs[0];
+        return {
+          message: first?.message || null,
+          proceedText: first?.proceedText || null,
+          id: first?.id || null,
+          url: first?.url || null,
+          proceedUrl: first?.proceedUrl || null,
+          abortUrl: first?.abortUrl || null,
+        };
       }
+    }
+  }
+  return null;
+}
 
-      const first = pending?.[0];
+function extractApprovalFromPendingActions(pendingActions) {
+  const actions = Array.isArray(pendingActions) ? pendingActions : [];
+  if (actions.length === 0) return null;
 
-      return {
-        phase: "AWAITING_APPROVAL",
-        rawStatus: raw,
-        stage: pausedStage?.name ?? "Approval",
-        message: first?.message,
-        // halaman approve UI Jenkins umumnya ada di /<build>/input/
-        inputPageUrl: new URL("input/", normalized).toString(),
-        // proceedUrl/abortUrl dari wfapi biasanya relative -> jadikan absolute
-        proceedUrl: first?.proceedUrl
-          ? new URL(first.proceedUrl, config.jenkins.baseUrl).toString()
-          : undefined,
-        abortUrl: first?.abortUrl
-          ? new URL(first.abortUrl, config.jenkins.baseUrl).toString()
-          : undefined,
-      };
+  const first = actions[0];
+  return {
+    message: first?.message || first?.input?.message || null,
+    proceedText: first?.proceedText || first?.input?.proceedText || null,
+    id: first?.id || first?.input?.id || null,
+    url: first?.url || null,
+    proceedUrl: first?.proceedUrl || null,
+    abortUrl: first?.abortUrl || null,
+  };
+}
+
+function extractApprovalFromClassicInputApi(inputApiJson) {
+  const inputs = Array.isArray(inputApiJson?.inputs) ? inputApiJson.inputs : [];
+  if (inputs.length === 0) return null;
+
+  const first = inputs[0];
+  return {
+    message: first?.message || first?.caption || null,
+    proceedText: first?.ok || first?.proceedText || null,
+    id: first?.id || null,
+    url: first?.url || null,
+    proceedUrl: first?.proceedUrl || null,
+    abortUrl: first?.abortUrl || null,
+  };
+}
+
+function normalizeApprovalUrls(approval, buildUrl) {
+  if (!approval) return null;
+  const normalizedBuildUrl = withTrailingSlash(buildUrl);
+  return {
+    ...approval,
+    url: toAbsoluteUrl(normalizedBuildUrl, approval.url),
+    proceedUrl: toAbsoluteUrl(config.jenkins.baseUrl, approval.proceedUrl),
+    abortUrl: toAbsoluteUrl(config.jenkins.baseUrl, approval.abortUrl),
+    inputPageUrl: toAbsoluteUrl(normalizedBuildUrl, "input/"),
+  };
+}
+
+function mapWfapiFinalResult(status) {
+  const s = String(status || "").toUpperCase();
+  if (s === "SUCCESS") return "SUCCESS";
+  if (s === "FAILED") return "FAILURE";
+  if (s === "ABORTED") return "ABORTED";
+  if (s === "UNSTABLE") return "UNSTABLE";
+  if (s === "NOT_BUILT") return "NOT_BUILT";
+  return null;
+}
+
+async function detectPendingApproval(buildUrl, wfDescribe = null) {
+  const normalizedBuildUrl = withTrailingSlash(buildUrl);
+
+  if (wfDescribe) {
+    const fromDescribe = extractApprovalFromPendingActions(wfDescribe?.pendingInputActions);
+    if (fromDescribe) return normalizeApprovalUrls(fromDescribe, normalizedBuildUrl);
+
+    const pendingHref = wfDescribe?._links?.pendingInputActions?.href;
+    const pendingUrl = toAbsoluteUrl(normalizedBuildUrl, pendingHref);
+    if (pendingUrl) {
+      try {
+        const pendingActions = await getJsonAbsolute(pendingUrl);
+        const fromPendingLink = extractApprovalFromPendingActions(pendingActions);
+        if (fromPendingLink) return normalizeApprovalUrls(fromPendingLink, normalizedBuildUrl);
+      } catch {
+        // Endpoint pending input dari describe bisa unavailable pada variasi plugin tertentu.
+      }
     }
 
-    // Not awaiting approval → map status normal
-    return {
-      phase: mapWfapiStatus(raw),
-      rawStatus: raw,
-      stage: currentStageName(stages),
-    };
+    const stages = Array.isArray(wfDescribe?.stages) ? wfDescribe.stages : [];
+    const pausedStage = stages.find((s) => String(s?.status || "").toUpperCase() === "PAUSED_PENDING_INPUT");
+    const statusUpper = String(wfDescribe?.status || "").toUpperCase();
+    const awaitingByStatus = statusUpper === "PAUSED_PENDING_INPUT";
+
+    if (pausedStage || awaitingByStatus) {
+      return normalizeApprovalUrls(
+        {
+          message: pausedStage?.name || wfDescribe?.message || "Awaiting approval",
+          proceedText: null,
+          id: null,
+          url: null,
+          proceedUrl: null,
+          abortUrl: null,
+        },
+        normalizedBuildUrl,
+      );
+    }
+  }
+
+  try {
+    const pendingActions = await getJsonAbsolute(`${normalizedBuildUrl}wfapi/pendingInputActions`);
+    const pendingApproval = extractApprovalFromPendingActions(pendingActions);
+    if (pendingApproval) return normalizeApprovalUrls(pendingApproval, normalizedBuildUrl);
+  } catch {
+    // Endpoint wfapi bisa tidak tersedia.
+  }
+
+  try {
+    const inputApi = await getJsonAbsolute(`${normalizedBuildUrl}input/api/json`);
+    const classicApproval = extractApprovalFromClassicInputApi(inputApi);
+    if (classicApproval) return normalizeApprovalUrls(classicApproval, normalizedBuildUrl);
   } catch {
     // ignore → fallback
   }
@@ -101,31 +180,81 @@ export async function getBuildState(buildUrl: string): Promise<BuildState> {
   if (building) return { phase: "IN_PROGRESS", rawStatus: "IN_PROGRESS" };
   if (result) return { phase: mapCoreResult(result), rawStatus: result };
 
-  return { phase: "UNKNOWN" };
+  const res = await jenkins.post(endpoint, form.toString(), { headers });
+
+  const location = res.headers?.location;
+  if (!location) throw new Error(`No Location header from Jenkins: ${jobNameOrPath}`);
+
+  return { queueUrl: withTrailingSlash(location) };
 }
 
-function mapWfapiStatus(s: string): UiBuildPhase {
-  switch (s) {
-    case "SUCCESS": return "SUCCESS";
-    case "FAILED": return "FAILED";
-    case "ABORTED": return "ABORTED";
-    case "UNSTABLE": return "UNSTABLE";
-    case "NOT_BUILT": return "NOT_BUILT";
-    case "IN_PROGRESS": return "IN_PROGRESS";
-    case "QUEUED": return "QUEUED";
-    default: return "UNKNOWN";
+export async function waitForBuildFromQueue(queueUrl) {
+  const startedAt = Date.now();
+
+  while (true) {
+    if (Date.now() - startedAt > config.jenkins.jobTimeoutMs) {
+      throw new Error(`Timeout waiting executable from queue: ${queueUrl}`);
+    }
+
+    const q = await getJsonAbsolute(`${queueUrl}api/json`);
+
+    if (q.cancelled) throw new Error(`Queue item cancelled: ${queueUrl}`);
+
+    if (q.executable?.url && q.executable?.number != null) {
+      return {
+        buildUrl: withTrailingSlash(q.executable.url),
+        buildNumber: q.executable.number,
+      };
+    }
+
+    await sleep(config.jenkins.pollIntervalMs);
   }
 }
 
-function mapCoreResult(r: string): UiBuildPhase {
-  // core API pakai FAILURE, wfapi pakai FAILED → normalize
-  switch (r) {
-    case "SUCCESS": return "SUCCESS";
-    case "FAILURE": return "FAILED";
-    case "ABORTED": return "ABORTED";
-    case "UNSTABLE": return "UNSTABLE";
-    case "NOT_BUILT": return "NOT_BUILT";
-    default: return "UNKNOWN";
+/**
+ * Ambil status build saat ini (tanpa menunggu).
+ * return:
+ *  - { state: "BUILDING" }
+ *  - { state: "AWAITING_APPROVAL", approval: {...} }
+ *  - { state: "FINISHED", result: "SUCCESS"|"FAILURE"|... }
+ */
+export async function getBuildState(buildUrl) {
+  const normalizedBuildUrl = withTrailingSlash(buildUrl);
+
+  // 1) Prefer wfapi karena lebih akurat untuk paused input (approval)
+  try {
+    const wfDescribe = await getJsonAbsolute(`${normalizedBuildUrl}wfapi/describe`);
+    const pendingApproval = await detectPendingApproval(normalizedBuildUrl, wfDescribe);
+    if (pendingApproval) {
+      return { state: "AWAITING_APPROVAL", approval: pendingApproval };
+    }
+
+    const wfResult = mapWfapiFinalResult(wfDescribe?.status);
+    if (wfResult) return { state: "FINISHED", result: wfResult };
+
+    if (String(wfDescribe?.status || "").toUpperCase() === "QUEUED") {
+      return { state: "BUILDING" };
+    }
+  } catch {
+    // ignore -> fallback ke core API
+  }
+
+  // 2) Fallback core API
+  // gunakan tree supaya payload kecil
+  const url = `${normalizedBuildUrl}api/json?tree=building,result,actions[_class,inputs[id,message,proceedText,url,proceedUrl,abortUrl]]`;
+  const b = await getJsonAbsolute(url);
+
+  const approval = normalizeApprovalUrls(extractApprovalInfo(b), normalizedBuildUrl);
+  if (approval) {
+    return { state: "AWAITING_APPROVAL", approval };
+  }
+
+  // Fallback lintas variasi Jenkins/Pipeline plugin ketika InputAction belum muncul di actions[].
+  if (b.building) {
+    const pendingApproval = await detectPendingApproval(normalizedBuildUrl);
+    if (pendingApproval) {
+      return { state: "AWAITING_APPROVAL", approval: pendingApproval };
+    }
   }
 }
 
