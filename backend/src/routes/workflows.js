@@ -198,6 +198,16 @@ workflowsRouter.post("/:id/push-git", async (req, res) => {
 
   try {
     const workflow = await getWorkflowById(workflowId);
+
+    await logWorkflowEvent({
+      workflowId,
+      workflowName: workflow?.name,
+      action: "PUSH_TO_GIT",
+      state: "RUNNING",
+      steps: [],
+      details: "Pushing to Git...",
+    });
+
     const step = await runJobAndWait(config.jenkins.jobDevToGit, params);
     const stepState = normalizeStepState(step);
 
