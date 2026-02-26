@@ -76,7 +76,7 @@ export async function getHistorySummary({ days = 7, status }) {
           created_at
         FROM public.deployment_history
         WHERE created_at >= NOW() - ($1::text || ' days')::interval
-        ORDER BY entity_type, entity_id, action, created_at DESC
+        ORDER BY entity_type, entity_id, action, created_at DESC, id DESC
       )
       SELECT status, COUNT(*)::int AS total
       FROM latest
@@ -100,7 +100,7 @@ export async function getHistorySummary({ days = 7, status }) {
           created_at
         FROM public.deployment_history
         WHERE created_at >= NOW() - ($1::text || ' days')::interval
-        ORDER BY entity_type, entity_id, action, created_at DESC
+        ORDER BY entity_type, entity_id, action, created_at DESC, id DESC
       )
       SELECT id, entity_id, entity_name, action, status, build_url, details, created_at
       FROM latest
@@ -125,7 +125,7 @@ export async function getHistorySummary({ days = 7, status }) {
           details,
           created_at
         FROM public.deployment_history
-        ORDER BY entity_type, entity_id, action, created_at DESC
+        ORDER BY entity_type, entity_id, action, created_at DESC, id DESC
       )
       SELECT id, entity_type, entity_id, entity_name, action, status, build_url, details, created_at
       FROM latest
