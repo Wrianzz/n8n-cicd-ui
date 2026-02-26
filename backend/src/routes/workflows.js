@@ -57,7 +57,7 @@ async function getLatestWorkflowHistory(workflowIds) {
       FROM public.deployment_history
       WHERE entity_type = 'WORKFLOW'
         AND entity_id = ANY($1::text[])
-      ORDER BY entity_id, created_at DESC
+      ORDER BY entity_id, created_at DESC, id DESC
     `,
     [ids]
   );

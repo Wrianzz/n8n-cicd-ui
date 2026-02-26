@@ -46,7 +46,7 @@ async function getLatestCredentialHistory(credentialIds) {
         created_at
       FROM expanded
       WHERE cred_id = ANY($1::text[])
-      ORDER BY cred_id, created_at DESC
+      ORDER BY cred_id, created_at DESC, id DESC
     `,
     [ids]
   );
