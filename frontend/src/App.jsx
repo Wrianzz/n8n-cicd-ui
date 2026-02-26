@@ -121,6 +121,12 @@ function WorkflowsPage() {
   async function load() {
     const data = await fetchWorkflows();
     setWorkflows(data);
+
+    const nextDeploy = {};
+    data.forEach((w) => {
+      if (w?.lastState?.label) nextDeploy[String(w.id)] = w.lastState;
+    });
+    setDeploy(nextDeploy);
   }
 
   useEffect(() => {
@@ -325,7 +331,7 @@ function WorkflowsPage() {
             <div>Name</div>
             <div>Last Updated</div>
             <div>Actions</div>
-            <div>Keterangan</div>
+            <div>State</div>
           </div>
 
           <div className="divide-y divide-slate-200">
@@ -425,6 +431,12 @@ function CredentialsPage() {
   async function load() {
     const data = await fetchCredentials(q);
     setCreds(data);
+
+    const nextPromoteState = {};
+    data.forEach((c) => {
+      if (c?.lastState?.label) nextPromoteState[String(c.id)] = c.lastState;
+    });
+    setPromoteState(nextPromoteState);
   }
 
   useEffect(() => {
@@ -539,7 +551,7 @@ function CredentialsPage() {
             <div>Name</div>
             <div>Last Updated</div>
             <div>Actions</div>
-            <div>Status</div>
+            <div>State</div>
           </div>
 
           <div className="divide-y divide-slate-200">
