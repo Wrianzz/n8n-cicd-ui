@@ -2,6 +2,7 @@ import express from "express";
 import { pool, prodPool } from "../clients/db.js";
 import { runJobAndWait } from "../clients/jenkins.js";
 import { config } from "../config.js";
+import { recordHistory } from "../utils/history.js";
 
 export const credentialsRouter = express.Router();
 
@@ -72,13 +73,43 @@ credentialsRouter.post("/promote", async (req, res) => {
 
     const step = await runJobAndWait(config.jenkins.jobPromoteCreds, params, { stopOnApproval: true });
 
+    const detail = `Promote credentials (${ids.join(",")})`;
+
     if (step.state === "AWAITING_APPROVAL") {
+      await recordHistory({
+        entityType: "CREDENTIAL",
+        entityId: ids.join(","),
+        action: "PROMOTE_CREDENTIAL",
+        status: "AWAITING_APPROVAL",
+        buildUrl: step?.buildUrl,
+        details: `${detail} awaiting approval`,
+        metadata: { ids, steps: [step] },
+      });
       return res.json({ state: "AWAITING_APPROVAL", steps: [step] });
     }
 
     if (step.state !== "FINISHED" || step.result !== "SUCCESS") {
+      await recordHistory({
+        entityType: "CREDENTIAL",
+        entityId: ids.join(","),
+        action: "PROMOTE_CREDENTIAL",
+        status: "FAILED",
+        buildUrl: step?.buildUrl,
+        details: `${detail} failed`,
+        metadata: { ids, steps: [step] },
+      });
       return res.status(500).json({ error: "PROMOTE_CREDS failed", steps: [step] });
     }
+
+    await recordHistory({
+      entityType: "CREDENTIAL",
+      entityId: ids.join(","),
+      action: "PROMOTE_CREDENTIAL",
+      status: "SUCCESS",
+      buildUrl: step?.buildUrl,
+      details: `${detail} success`,
+      metadata: { ids, steps: [step] },
+    });
 
     res.json({ state: "SUCCESS", steps: [step] });
   } catch (e) {

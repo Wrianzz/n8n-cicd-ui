@@ -70,3 +70,10 @@ export async function promoteCredentials(ids) {
     body: JSON.stringify({ ids }),
   });
 }
+
+export async function fetchDashboardSummary({ days = 7, healthStatus = "ALL" } = {}) {
+  const u = new URL("/api/dashboard/summary", window.location.origin);
+  u.searchParams.set("days", String(days));
+  u.searchParams.set("healthStatus", String(healthStatus));
+  return await request(u.toString());
+}

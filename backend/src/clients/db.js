@@ -18,3 +18,4 @@ function createPool(dbConfig) {
 
 export const pool = createPool(config.db);
 export const prodPool = createPool(config.prodDb);
+export const backendPool = createPool(config.backendDb);

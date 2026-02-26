@@ -47,4 +47,13 @@ export const config = {
     password: requireEnv("N8N_PROD_DB_PASSWORD"),
     ssl: String(process.env.N8N_PROD_DB_SSL || "false").toLowerCase() === "true",
   },
+
+  backendDb: {
+    host: requireEnv("BACKEND_DB_HOST"),
+    port: Number(process.env.BACKEND_DB_PORT || 5432),
+    database: requireEnv("BACKEND_DB_NAME"),
+    user: requireEnv("BACKEND_DB_USER"),
+    password: requireEnv("BACKEND_DB_PASSWORD"),
+    ssl: String(process.env.BACKEND_DB_SSL || "false").toLowerCase() === "true",
+  },
 };

@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { jenkinsRouter } from "./routes/jenkins.js";
 import { credentialsRouter } from "./routes/credentials.js";
+import { dashboardRouter } from "./routes/dashboard.js";
 
 const app = express();
 
@@ -15,6 +16,7 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 app.use("/api/workflows", workflowsRouter);
 app.use("/api/jenkins", jenkinsRouter);
 app.use("/api/credentials", credentialsRouter);
+app.use("/api/dashboard", dashboardRouter);
 
 // ADD: JSON 404 for /api/*
 app.use("/api", (req, res) => {
