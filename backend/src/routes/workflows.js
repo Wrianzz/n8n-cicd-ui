@@ -1,12 +1,88 @@
 import express from "express";
 import { listAllWorkflows, getWorkflowById } from "../clients/n8n.js";
-import { runJobAndWait } from "../clients/jenkins.js";
+import { getBuildState, runJobAndWait } from "../clients/jenkins.js";
 import { config } from "../config.js";
 import { pool, prodPool, backendPool } from "../clients/db.js";
 import { recordHistory } from "../utils/history.js";
 
 export const workflowsRouter = express.Router();
 
+
+
+
+function buildWorkflowDetails(action, status) {
+  if (action === "PUSH_TO_GIT") {
+    if (status === "AWAITING_APPROVAL") return "Push to Git awaiting approval";
+    if (status === "SUCCESS") return "Workflow pushed to Git";
+    if (status === "FAILED") return "DEV_TO_GIT failed";
+  }
+
+  if (action === "PULL_FROM_GIT") {
+    if (status === "AWAITING_APPROVAL") return "Deploy awaiting approval";
+    if (status === "SUCCESS") return "Workflow deployed from Git";
+    if (status === "FAILED") return "DEPLOY_FROM_GIT failed";
+  }
+
+  if (action === "PUSH_TO_PROD") {
+    if (status === "AWAITING_APPROVAL") return "Deploy awaiting approval";
+    if (status === "SUCCESS") return "Workflow promoted to production";
+    if (status === "FAILED") return "DEPLOY_FROM_GIT failed";
+  }
+
+  return status;
+}
+
+function getPrimaryBuildUrl(row) {
+  const steps = Array.isArray(row?.metadata?.steps) ? row.metadata.steps : [];
+  const withUrl = steps.filter((step) => step?.buildUrl);
+  if (withUrl.length > 0) return withUrl[withUrl.length - 1].buildUrl;
+  return row?.build_url || null;
+}
+
+async function refreshWorkflowHistoryState(row) {
+  if (row?.status !== "RUNNING") return row;
+
+  const buildUrl = getPrimaryBuildUrl(row);
+  if (!buildUrl) return row;
+
+  try {
+    const st = await getBuildState(buildUrl);
+    if (st.state === "BUILDING") return row;
+
+    if (st.state === "AWAITING_APPROVAL") {
+      await recordHistory({
+        entityType: "WORKFLOW",
+        entityId: row.entity_id,
+        entityName: row.entity_name || null,
+        action: row.action,
+        status: "AWAITING_APPROVAL",
+        buildUrl,
+        details: buildWorkflowDetails(row.action, "AWAITING_APPROVAL"),
+        metadata: row.metadata || {},
+      });
+      return { ...row, status: "AWAITING_APPROVAL", details: buildWorkflowDetails(row.action, "AWAITING_APPROVAL") };
+    }
+
+    if (st.state === "FINISHED") {
+      const status = st.result === "SUCCESS" ? "SUCCESS" : "FAILED";
+      await recordHistory({
+        entityType: "WORKFLOW",
+        entityId: row.entity_id,
+        entityName: row.entity_name || null,
+        action: row.action,
+        status,
+        buildUrl,
+        details: buildWorkflowDetails(row.action, status),
+        metadata: row.metadata || {},
+      });
+      return { ...row, status, details: buildWorkflowDetails(row.action, status) };
+    }
+  } catch {
+    return row;
+  }
+
+  return row;
+}
 
 
 function workflowHistoryLabel(row) {
@@ -74,7 +150,8 @@ async function getLatestWorkflowHistory(workflowIds) {
   };
 
   const mapped = new Map();
-  for (const row of rows) {
+  for (const sourceRow of rows) {
+    const row = await refreshWorkflowHistoryState(sourceRow);
     const entityId = String(row.entity_id);
     const existing = mapped.get(entityId);
 
