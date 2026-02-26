@@ -209,7 +209,7 @@ export async function waitForBuildFinalOrApproval(buildUrl, { stopOnApproval } =
 }
 
 export async function runJobAndWait(jobNameOrPath, paramsObj, opts = {}) {
-  const { stopOnApproval = false } = opts;
+  const { stopOnApproval = true } = opts;
 
   const { queueUrl } = await triggerJob(jobNameOrPath, paramsObj);
   const { buildUrl, buildNumber } = await waitForBuildFromQueue(queueUrl);
